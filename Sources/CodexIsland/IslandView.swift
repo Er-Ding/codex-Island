@@ -1,11 +1,13 @@
 import SwiftUI
 
-/// The visible island. Window placement and mouse behavior live in IslandState.
+/// The visible island animates inside a fixed, transparent window canvas.
 @MainActor
 struct IslandView: View {
     @ObservedObject var store: QuotaStore
     @ObservedObject var state: IslandState
+    @ObservedObject var presentation: IslandPresentation
     @State private var selectedBucketID: String?
+    @StateObject private var bucketMenu = IslandBucketMenu()
 
     private let mint = Color(red: 0.46, green: 0.88, blue: 0.70)
 
@@ -18,53 +20,79 @@ struct IslandView: View {
     }
     private var primary: QuotaWindow? { selectedBucket?.primary ?? selectedBucket?.secondary }
     private var secondary: QuotaWindow? { selectedBucket?.primary == nil ? nil : selectedBucket?.secondary }
-    private var contentWidth: CGFloat { max(0, state.width - 36) }
-    private var titleWidth: CGFloat { max(0, contentWidth - 139) }
-    private var cardWidth: CGFloat { secondary == nil ? contentWidth : max(0, (contentWidth - 10) / 2) }
+    // Scale layout and typography in points so text stays natively rendered.
+    private func s(_ base: CGFloat) -> CGFloat { base * state.uiScale }
+
+    // Keep detail layout stable while the window reveals or clips it.
+    private var contentWidth: CGFloat { max(0, state.expandedWidth - s(36)) }
+    private var titleWidth: CGFloat { max(0, contentWidth - s(139)) }
+    private var cardWidth: CGFloat { secondary == nil ? contentWidth : max(0, (contentWidth - s(10)) / 2) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if state.isAdjustingPosition {
-                positionAdjustmentHeader
-                    .frame(height: state.headerHeight)
-            } else {
-                compactHeader
-                    .frame(height: state.headerHeight)
-            }
+        GeometryReader { _ in
+            let geometry = presentation.geometry
+            let size = geometry.visibleFrame.size
+            let expansion = min(1, max(0, (size.height - state.headerHeight) / state.detailHeight))
+            let reveal = min(1, max(0, (expansion - 0.12) / 0.70))
+            let outline = IslandOutline(expansion: expansion, topClearance: geometry.topClearance, uiScale: state.uiScale)
+            let border = IslandOutline(expansion: expansion, topClearance: geometry.topClearance,
+                                       uiScale: state.uiScale, omitsTopEdge: geometry.topClearance == 0)
 
-            if state.isExpanded {
+            ZStack(alignment: .top) {
+                // Keep the same view alive in both directions. Removing it when
+                // isExpanded flips would collapse the content before the window.
                 expandedContent
-                    .frame(height: 300, alignment: .top)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .frame(width: state.expandedWidth, height: state.detailHeight, alignment: .top)
+                    .opacity(Double(reveal * reveal * (3 - 2 * reveal)))
+                    .offset(y: state.headerHeight)
+                    .allowsHitTesting(state.isExpanded && expansion > 0.9)
+                    .accessibilityHidden(!state.isExpanded || state.isAdjustingPosition)
+
+                Group {
+                    if state.isAdjustingPosition {
+                        positionAdjustmentHeader
+                    } else {
+                        compactHeader
+                    }
+                }
+                .frame(width: size.width, height: state.headerHeight)
             }
+            .frame(width: size.width, height: size.height, alignment: .top)
+            .background(outline.fill(Color(white: 0.025)))
+            .overlay {
+                border
+                    .stroke(state.isAdjustingPosition ? mint.opacity(0.55) : Color.white.opacity(0.085), lineWidth: s(1))
+                    .allowsHitTesting(false)
+            }
+            .clipShape(outline)
+            .offset(x: geometry.visibleFrame.minX - geometry.canvasFrame.minX,
+                    y: geometry.canvasFrame.maxY - geometry.visibleFrame.maxY)
         }
-        .frame(width: state.width, height: state.height, alignment: .top)
-        .background(IslandOutline(expanded: state.isExpanded).fill(Color(white: 0.025)))
-        .overlay {
-            IslandOutline(expanded: state.isExpanded)
-                .stroke(state.isAdjustingPosition ? mint.opacity(0.55) : Color.white.opacity(0.085), lineWidth: 1)
-                .allowsHitTesting(false)
-        }
-        .clipShape(IslandOutline(expanded: state.isExpanded))
+        // Presentation updates are already timed by the controller. Implicit
+        // layer/SwiftUI animation would blend old and new frames a second time.
+        .transaction { $0.animation = nil }
         .preferredColorScheme(.dark)
         .onChange(of: state.isExpanded) { expanded in
+            if !expanded { bucketMenu.dismiss() }
             guard expanded, !store.isRefreshing else { return }
             if store.snapshot.map({ Date().timeIntervalSince($0.fetchedAt) > 5 }) ?? true {
                 store.refresh()
             }
         }
+        .onChange(of: state.uiScale) { _ in bucketMenu.dismiss() }
+        .onDisappear { bucketMenu.dismiss() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(state.isAdjustingPosition ? "调整灵动岛位置" : "Codex 额度")
     }
 
     private var positionAdjustmentHeader: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 8) {
+        HStack(spacing: s(8)) {
+            HStack(spacing: s(8)) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: s(12), weight: .medium))
                     .foregroundStyle(mint)
                 Text("拖动调整位置")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: s(12), weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.90))
                     .lineLimit(1)
             }
@@ -74,9 +102,9 @@ struct IslandView: View {
 
             Button { state.finishPositionAdjustment() } label: {
                 Text("完成")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: s(11), weight: .semibold))
                     .foregroundStyle(Color.black.opacity(0.90))
-                    .frame(width: 44, height: 24)
+                    .frame(width: s(44), height: s(24))
                     .background(Capsule().fill(mint))
                     .contentShape(Capsule())
             }
@@ -85,16 +113,16 @@ struct IslandView: View {
 
             Button { state.cancelPositionAdjustment() } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: s(10), weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.60))
-                    .frame(width: 22, height: 24)
+                    .frame(width: s(22), height: s(24))
                     .contentShape(Rectangle())
             }
             .help("取消，回到调整前的位置")
             .accessibilityLabel("取消位置调整")
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 11)
+        .padding(.horizontal, s(11))
     }
 
     private var compactHeader: some View {
@@ -103,7 +131,7 @@ struct IslandView: View {
                 if secondary != nil {
                     compactValue(primary, symbol: "sparkle", label: primary?.periodTitle ?? "当前周期")
                 } else {
-                    HStack(spacing: 5) {
+                    HStack(spacing: s(5)) {
                         Image(systemName: "sparkle")
                             .foregroundStyle(mint)
                         Text(primary?.periodTitle ?? "Codex")
@@ -111,20 +139,20 @@ struct IslandView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                     }
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: s(10), weight: .medium))
                 }
             }
             .frame(maxWidth: .infinity)
 
             // No text or controls may enter the physical camera cutout.
-            Color.clear.frame(width: state.notchWidth > 0 ? state.notchWidth : 12)
+            Color.clear.frame(width: state.notchWidth > 0 ? state.notchWidth : s(12))
 
             compactValue(secondary ?? primary, symbol: nil,
                          label: (secondary ?? primary)?.periodTitle ?? "当前周期",
                          showPeriod: secondary != nil)
                 .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 5)
+        .padding(.horizontal, s(5))
         .contentShape(Rectangle())
         .onTapGesture { state.toggleExpanded() }
         .help(state.isPinned ? "点击收起" : "点击固定额度面板")
@@ -133,27 +161,27 @@ struct IslandView: View {
     }
 
     private func compactValue(_ window: QuotaWindow?, symbol: String?, label: String, showPeriod: Bool = true) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: s(5)) {
             if let symbol {
                 Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: s(11), weight: .semibold))
                     .foregroundStyle(mint)
             } else if showPeriod {
                 Text(window?.periodTitle ?? "")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: s(9), weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.55))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
             Text(percentText(window))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(.system(size: s(12), weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(quotaColor(window))
                 .fixedSize()
             if !state.isExpanded && (store.isStale || store.errorMessage != nil) {
                 Circle()
                     .fill(Color.orange)
-                    .frame(width: 4, height: 4)
+                    .frame(width: s(4), height: s(4))
                     .accessibilityLabel("额度数据待更新")
             }
         }
@@ -162,37 +190,37 @@ struct IslandView: View {
     }
 
     private var expandedContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: s(12)) {
+            HStack(spacing: s(10)) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 9)
+                    RoundedRectangle(cornerRadius: s(9))
                         .fill(mint.opacity(0.11))
                     Image(systemName: "sparkle")
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.system(size: s(17), weight: .medium))
                         .foregroundStyle(mint)
                 }
-                .frame(width: 33, height: 33)
+                .frame(width: s(33), height: s(33))
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: s(2)) {
                     bucketSelector
                     Text("剩余额度")
-                        .font(.system(size: 10))
+                        .font(.system(size: s(10)))
                         .foregroundStyle(Color.white.opacity(0.40))
                 }
                 .frame(width: titleWidth, alignment: .leading)
 
                 Text(store.isDemo ? "演示数据" : (store.snapshot?.planName ?? "账户额度"))
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: s(10), weight: .medium))
                     .foregroundStyle(store.isDemo ? Color.orange : Color.white.opacity(0.65))
                     .lineLimit(1)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .frame(width: 86)
+                    .padding(.horizontal, s(9))
+                    .padding(.vertical, s(5))
+                    .frame(width: s(86))
                     .background(Capsule().fill(Color.white.opacity(0.065)))
             }
             .frame(width: contentWidth, alignment: .leading)
 
-            HStack(spacing: 10) {
+            HStack(spacing: s(10)) {
                 quotaCard(primary, fallbackTitle: "当前周期")
                 if let secondary {
                     quotaCard(secondary, fallbackTitle: "当前周期")
@@ -202,16 +230,16 @@ struct IslandView: View {
 
             Rectangle()
                 .fill(Color.white.opacity(0.075))
-                .frame(height: 1)
+                .frame(height: s(1))
 
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: s(8)) {
                 statusText
-                    .frame(width: max(0, contentWidth - 135), alignment: .leading)
+                    .frame(width: max(0, contentWidth - s(135)), alignment: .leading)
 
-                HStack(spacing: 5) {
+                HStack(spacing: s(5)) {
                     Button { state.beginPositionAdjustment() } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .frame(width: 28, height: 28)
+                            .frame(width: s(28), height: s(28))
                     }
                     .help("调整位置")
                     .accessibilityLabel("调整灵动岛位置")
@@ -219,11 +247,11 @@ struct IslandView: View {
                     Button { store.refresh() } label: {
                         if store.isRefreshing {
                             ProgressView()
-                                .controlSize(.mini)
-                                .frame(width: 28, height: 28)
+                                .controlSize(state.uiScale >= 1.75 ? .regular : (state.uiScale >= 1.25 ? .small : .mini))
+                                .frame(width: s(28), height: s(28))
                         } else {
                             Image(systemName: "arrow.clockwise")
-                                .frame(width: 28, height: 28)
+                                .frame(width: s(28), height: s(28))
                         }
                     }
                     .disabled(store.isRefreshing)
@@ -233,10 +261,10 @@ struct IslandView: View {
                     Button { state.isPinned.toggle() } label: {
                         Image(systemName: state.isPinned ? "pin.fill" : "pin")
                             .foregroundStyle(state.isPinned ? mint : Color.white.opacity(0.55))
-                            .frame(width: 28, height: 28)
+                            .frame(width: s(28), height: s(28))
                             .background {
                                 if state.isPinned {
-                                    RoundedRectangle(cornerRadius: 7).fill(mint.opacity(0.09))
+                                    RoundedRectangle(cornerRadius: s(7)).fill(mint.opacity(0.09))
                                 }
                             }
                     }
@@ -247,63 +275,57 @@ struct IslandView: View {
                         state.collapse()
                     } label: {
                         Image(systemName: "chevron.up")
-                            .frame(width: 28, height: 28)
+                            .frame(width: s(28), height: s(28))
                     }
                     .help("收起")
                     .accessibilityLabel("收起额度面板")
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: s(12), weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.55))
-                .frame(width: 127)
+                .frame(width: s(127))
             }
-            .frame(width: contentWidth, height: 52, alignment: .topLeading)
+            .frame(width: contentWidth, height: s(52), alignment: .topLeading)
         }
         .frame(width: contentWidth, alignment: .leading)
-        .padding(.horizontal, 18)
-        .padding(.top, 16)
-        .padding(.bottom, 18)
-        .frame(width: state.width, alignment: .leading)
+        .padding(.horizontal, s(18))
+        .padding(.top, s(16))
+        .padding(.bottom, s(18))
+        .frame(width: state.expandedWidth, alignment: .leading)
     }
 
     @ViewBuilder
     private var bucketSelector: some View {
         if let buckets = store.snapshot?.buckets, buckets.count > 1 {
-            Menu {
-                ForEach(buckets) { bucket in
-                    Button {
-                        selectedBucketID = bucket.id
-                    } label: {
-                        if bucket.id == selectedBucket?.id {
-                            Label(bucket.name, systemImage: "checkmark")
-                        } else {
-                            Text(bucket.name)
-                        }
-                    }
+            Button {
+                bucketMenu.present(buckets: buckets, selectedID: selectedBucket?.id, scale: state.uiScale) { id in
+                    selectedBucketID = id
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: s(6)) {
                     Text(selectedBucket?.name ?? "Codex")
+                        .font(.system(size: s(20), weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: s(9), weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.4))
                 }
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: s(20), weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.94))
                 .frame(width: titleWidth, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
             .frame(width: titleWidth, alignment: .leading)
+            .background { IslandBucketMenuAnchor(menu: bucketMenu) }
             .clipped()
             .help("\(selectedBucket?.name ?? "Codex") · 点击切换额度种类")
             .accessibilityLabel("额度种类：\(selectedBucket?.name ?? "Codex")")
         } else {
             Text(selectedBucket?.name ?? "Codex")
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: s(20), weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.94))
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -314,21 +336,21 @@ struct IslandView: View {
     private func quotaCard(_ window: QuotaWindow?, fallbackTitle: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(window?.periodTitle ?? fallbackTitle)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: s(11), weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.58))
                 .lineLimit(1)
 
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: s(5)) {
                 Text(percentText(window))
-                    .font(.system(size: 29, weight: .semibold, design: .rounded))
+                    .font(.system(size: s(29), weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(quotaColor(window))
                 Text("剩余")
-                    .font(.system(size: 10))
+                    .font(.system(size: s(10)))
                     .foregroundStyle(Color.white.opacity(0.40))
             }
-            .padding(.top, 10)
-            .padding(.bottom, 13)
+            .padding(.top, s(10))
+            .padding(.bottom, s(13))
 
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
@@ -338,43 +360,43 @@ struct IslandView: View {
                         .frame(width: geometry.size.width * remainingFraction(window))
                 }
             }
-            .frame(height: 4)
+            .frame(height: s(4))
             .accessibilityHidden(true)
 
             Text(window.map { $0.resetText(now: Date()) } ?? "等待账户数据")
-                .font(.system(size: 10))
+                .font(.system(size: s(10)))
                 .foregroundStyle(Color.white.opacity(0.42))
                 .lineLimit(2)
-                .frame(height: 27, alignment: .topLeading)
-                .padding(.top, 10)
+                .frame(height: s(27), alignment: .topLeading)
+                .padding(.top, s(10))
         }
-        .frame(width: max(0, cardWidth - 28), height: 112, alignment: .topLeading)
-        .padding(14)
+        .frame(width: max(0, cardWidth - s(28)), height: s(112), alignment: .topLeading)
+        .padding(s(14))
         .background {
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
+            RoundedRectangle(cornerRadius: s(15), style: .continuous)
                 .fill(Color.white.opacity(0.037))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                        .stroke(Color.white.opacity(0.045), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: s(15), style: .continuous)
+                        .stroke(Color.white.opacity(0.045), lineWidth: s(1))
                 }
         }
         .accessibilityElement(children: .combine)
     }
 
     private var statusText: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 5) {
+        VStack(alignment: .leading, spacing: s(3)) {
+            HStack(spacing: s(5)) {
                 Circle()
                     .fill(statusColor)
-                    .frame(width: 4, height: 4)
+                    .frame(width: s(4), height: s(4))
                 Text(statusTitle)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: s(10), weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.50))
             }
 
             if let error = store.errorMessage {
                 Text(error)
-                    .font(.system(size: 9))
+                    .font(.system(size: s(9)))
                     .foregroundStyle(Color.orange.opacity(0.80))
                     .lineLimit(2)
                     .help(error)
@@ -382,11 +404,11 @@ struct IslandView: View {
 
             if let fetched = store.snapshot?.fetchedAt {
                 Text("上次更新 \(fetched.formatted(date: .omitted, time: .shortened))")
-                    .font(.system(size: 9))
+                    .font(.system(size: s(9)))
                     .foregroundStyle(Color.white.opacity(0.31))
             } else if store.errorMessage == nil {
                 Text("请先在 Codex 中登录账户")
-                    .font(.system(size: 9))
+                    .font(.system(size: s(9)))
                     .foregroundStyle(Color.white.opacity(0.31))
             }
         }
@@ -427,14 +449,19 @@ struct IslandView: View {
 }
 
 private struct IslandOutline: Shape {
-    var expanded: Bool
+    var expansion: CGFloat
+    var topClearance: CGFloat
+    var uiScale: CGFloat
+    var omitsTopEdge = false
 
     func path(in rect: CGRect) -> Path {
-        let top: CGFloat = 7
-        let bottom: CGFloat = min(expanded ? 25 : 17, rect.height / 2)
+        let radius = (17 + 8 * expansion) * uiScale
+        // Flush with the display: square top corners. As the island moves away
+        // from the edge, restore the floating shape without a sudden corner jump.
+        let top: CGFloat = min(radius, topClearance, rect.height / 2, rect.width / 2)
+        let bottom: CGFloat = min(radius, rect.height / 2, rect.width / 2)
         var path = Path()
-        path.move(to: CGPoint(x: rect.minX + top, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX - top, y: rect.minY))
+        path.move(to: CGPoint(x: rect.maxX - top, y: rect.minY))
         path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + top), control: CGPoint(x: rect.maxX, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - bottom))
         path.addQuadCurve(to: CGPoint(x: rect.maxX - bottom, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
@@ -442,7 +469,9 @@ private struct IslandOutline: Shape {
         path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - bottom), control: CGPoint(x: rect.minX, y: rect.maxY))
         path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + top))
         path.addQuadCurve(to: CGPoint(x: rect.minX + top, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
-        path.closeSubpath()
+        // The fill and clip always close. The attached outline omits the top
+        // stroke so there is no bright seam against the display's upper edge.
+        if !omitsTopEdge { path.closeSubpath() }
         return path
     }
 }

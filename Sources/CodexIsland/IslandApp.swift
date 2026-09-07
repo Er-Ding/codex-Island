@@ -51,6 +51,8 @@ final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var positionItem: NSMenuItem?
     private var cancelPositionItem: NSMenuItem?
     private var resetPositionItem: NSMenuItem?
+    private var displaySizeItem: NSMenuItem?
+    private var displaySizeOptions: [NSMenuItem] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
@@ -86,6 +88,7 @@ final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        menu.autoenablesItems = false
         let title = NSMenuItem(title: isDemo ? "Codex Island · 演示" : "Codex Island", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
@@ -98,6 +101,21 @@ final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh.target = self
         menu.addItem(refresh)
         menu.addItem(.separator())
+        let displaySize = NSMenuItem(title: "显示大小", action: nil, keyEquivalent: "")
+        displaySize.toolTip = "调整浮动岛当前所在显示器上的大小"
+        let displaySizeMenu = NSMenu(title: "显示大小")
+        displaySizeMenu.delegate = self
+        displaySizeMenu.autoenablesItems = false
+        for preference in IslandSizePreference.allCases {
+            let option = NSMenuItem(title: preference.title, action: #selector(setDisplaySize(_:)), keyEquivalent: "")
+            option.target = self
+            option.tag = preference.rawValue
+            displaySizeOptions.append(option)
+            displaySizeMenu.addItem(option)
+        }
+        displaySize.submenu = displaySizeMenu
+        displaySizeItem = displaySize
+        menu.addItem(displaySize)
         let position = NSMenuItem(title: "调整位置…", action: #selector(adjustPosition), keyEquivalent: "")
         position.target = self
         positionItem = position
@@ -125,10 +143,27 @@ final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         positionItem?.title = adjusting ? "完成并锁定位置" : "调整位置…"
         cancelPositionItem?.isHidden = !adjusting
         resetPositionItem?.isEnabled = adjusting || island?.hasCustomPosition == true
+        let sizePreference = island?.sizePreference ?? .automatic
+        let scalePercent = Int(((island?.resolvedUIScale ?? 1) * 100).rounded())
+        let canAdjustSize = island != nil && !adjusting
+        displaySizeItem?.isEnabled = canAdjustSize
+        for option in displaySizeOptions {
+            guard let preference = IslandSizePreference(rawValue: option.tag) else { continue }
+            option.state = preference == sizePreference ? .on : .off
+            option.isEnabled = canAdjustSize
+            option.title = preference == .automatic && sizePreference == .automatic
+                ? "\(preference.title)（当前 \(scalePercent)%）"
+                : preference.title
+        }
     }
 
     @objc private func toggleIsland() { island?.toggleVisibility() }
     @objc private func refreshQuota() { store?.refresh() }
+    @objc private func setDisplaySize(_ sender: NSMenuItem) {
+        guard let island, !island.isAdjustingPosition,
+              let preference = IslandSizePreference(rawValue: sender.tag) else { return }
+        island.setSizePreference(preference)
+    }
     @objc private func adjustPosition() {
         if island?.isAdjustingPosition == true { island?.finishPositionAdjustment() }
         else { island?.beginPositionAdjustment() }
