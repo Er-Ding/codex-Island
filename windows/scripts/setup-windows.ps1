@@ -7,4 +7,4 @@ Invoke-WebRequest -UseBasicParsing -Uri 'https://dot.net/v1/dotnet-install.ps1' 
 & $installer -Channel 10.0 -Quality GA -InstallDir (Join-Path $buildDirectory 'dotnet') -NoPath
 $sdk = Join-Path $buildDirectory 'dotnet\dotnet.exe'
 if (!(Test-Path -LiteralPath $sdk) -or !((& $sdk --list-sdks) -match '^10\.')) { throw '.NET SDK installation failed.' }
-Write-Output 'The SDK is ready. Run scripts\build-windows.ps1 next.'
+Write-Output 'The SDK is ready. Run windows\scripts\build-windows.ps1 next.'

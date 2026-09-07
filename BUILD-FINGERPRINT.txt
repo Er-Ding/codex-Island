@@ -1,3 +1,0 @@
-Codex Island 0.2.0 / arm64
-SHA-256 of Contents/MacOS/CodexIsland:
-9dbaf2b13cf525d5c7379408803994750874c262a56d41acfb61b036570e7439

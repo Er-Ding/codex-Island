@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$repositoryRoot = Split-Path -Parent $projectRoot
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_NOLOGO = '1'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -13,5 +14,5 @@ function Get-IslandDotNet {
             return $candidate
         }
     }
-    throw 'A .NET 10 SDK is required. Run scripts\setup-windows.ps1 or install it from https://dotnet.microsoft.com/download/dotnet/10.0'
+    throw 'A .NET 10 SDK is required. Run windows\scripts\setup-windows.ps1 or install it from https://dotnet.microsoft.com/download/dotnet/10.0'
 }
