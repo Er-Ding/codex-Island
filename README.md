@@ -1,5 +1,7 @@
 # Codex Island
 
+现已增加 **Windows 原生版（0.3.1）**：使用 C# / WPF，支持真实额度、透明置顶窗口、托盘、位置保存和按显示器调整大小。本版改为鼠标移入立即展开，并统一额度菜单与面板的字体、配色和间距。运行与构建见 [Windows 说明](windows/README.md)，架构梳理见 [Windows 适配说明](docs/WINDOWS_PORT.md)。下文为现有 macOS 版本说明。
+
 一个放在 MacBook 摄像头附近的 Codex 额度小工具。平时只露出周期与剩余比例，鼠标移入后展开查看详情。使用这台 Mac 已登录的 Codex 账号。
 
 ## 打开
