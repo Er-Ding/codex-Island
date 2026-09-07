@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="CodexIsland.Checks/CodexIsland.Checks.csproj" />
+  <Project Path="CodexIsland.Core/CodexIsland.Core.csproj" />
+  <Project Path="CodexIsland.Windows/CodexIsland.Windows.csproj" />
+</Solution>
