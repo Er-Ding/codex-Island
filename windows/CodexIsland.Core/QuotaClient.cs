@@ -37,7 +37,7 @@ public sealed class QuotaClient(Func<string?>? executable = null, TimeSpan? requ
                     requestTimeout ?? TimeSpan.FromSeconds(20), () => QuotaChanged?.Invoke());
                 await connection.RequestAsync("initialize", new
                 {
-                    clientInfo = new { name = "codex_island_windows", title = "Codex Island", version = "0.3.1" }
+                    clientInfo = new { name = "codex_island_windows", title = "Codex Island", version = "0.3.3" }
                 }, linked.Token).ConfigureAwait(false);
                 await connection.SendAsync(new { method = "initialized", @params = new { } }, linked.Token).ConfigureAwait(false);
             }

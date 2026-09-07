@@ -102,6 +102,125 @@ internal static class SmokeChecks
         await Settle();
         Check(window.IsVisible, "show restores the native window");
         Check(store.IsDemo && store.ErrorMessage is null, "UI diagnostics use explicit demo data");
+        // Exercise capture/move/release synchronously: the very first changed coordinate must move,
+        // before the dispatcher can run a timer. These checks do not move the user's pointer.
+        window.ResetPosition();
+        window.SetSize(IslandSize.Percent100);
+        window.Interaction.SetMenuOpen(false);
+        void Expand()
+        {
+            window.Interaction.ObservePointer(false, 0);
+            window.Interaction.ObservePointer(true, 1);
+            window.ApplyState(false);
+            window.UpdateLayout();
+        }
+        PointD TopPoint()
+        {
+            var button = (Button)window.FindName("HeaderButton");
+            var point = button.PointToScreen(new Point(button.ActualWidth / 2, button.ActualHeight / 2));
+            return new(point.X, point.Y);
+        }
+        Expand();
+        var pressOrigin = window.VisibleFrame;
+        var pressPoint = TopPoint();
+        Check(window.BeginHeaderPress(pressPoint), "expanded header captures the pointer immediately on press");
+        window.MoveHeaderPress(pressPoint);
+        Check(window.VisibleFrame == pressOrigin && !window.IsHeaderDragging, "stationary input does not begin dragging");
+        window.EndHeaderPress(pressPoint);
+        Check(window.Interaction.IsPinned && !window.IsHeaderPressed && settings.Load().Position is null,
+            "a stationary click pins without saving a position");
+        window.BeginHeaderPress(pressPoint);
+        window.EndHeaderPress(pressPoint);
+        Check(!window.Interaction.IsPinned && window.Interaction.IsExpanded && window.VisibleFrame == pressOrigin,
+            "single-click unpins without shrinking the double-click target");
+        Check(window.BeginHeaderPress(pressPoint), "unpinned expanded header can start another drag");
+        window.MoveHeaderPress(new(pressPoint.X + 1, pressPoint.Y));
+        Check(window.IsHeaderDragging && Math.Abs(window.VisibleFrame.X - pressOrigin.X - 1) < .1,
+            "the first one-pixel move starts dragging in the same input call with no timer or threshold");
+        window.MoveHeaderPress(new(pressPoint.X + 90, pressPoint.Y + 100));
+        Check(window.Interaction.IsExpanded && !window.Interaction.IsAdjusting,
+            "immediate dragging preserves the expanded panel without adjustment mode");
+        Check(Math.Abs(window.VisibleFrame.X - pressOrigin.X - 90) < 2 && Math.Abs(window.VisibleFrame.Y - pressOrigin.Y - 100) < 2,
+            "header drag follows physical movement using the original press anchor");
+        Check(settings.Load().Position is null, "dragging does not persist an unfinished move");
+        window.EndHeaderPress(new(pressPoint.X + 90, pressPoint.Y + 100));
+        var droppedFrame = window.VisibleFrame;
+        Check(settings.Load().Position is { IsValid: true } && !window.IsHeaderPressed
+            && window.Interaction.IsExpanded && !window.Interaction.IsPinned,
+            "release automatically saves the position without toggling pinning");
+        window.RefreshEnvironment();
+        Check(Math.Abs(window.VisibleFrame.X - droppedFrame.X) < 2 && Math.Abs(window.VisibleFrame.Y - droppedFrame.Y) < 2,
+            "dragged position survives a settings reload");
+        var droppedSettings = settings.Load().Position;
+        var nextPoint = TopPoint();
+        window.BeginHeaderPress(nextPoint);
+        window.MoveHeaderPress(new(nextPoint.X - 60, nextPoint.Y + 70));
+        ((Button)window.FindName("HeaderButton")).ReleaseMouseCapture();
+        Check(!window.IsHeaderPressed && window.VisibleFrame == droppedFrame && settings.Load().Position == droppedSettings,
+            "capture loss cancels the draft and restores the saved position");
+        nextPoint = TopPoint();
+        window.BeginHeaderPress(nextPoint);
+        window.EndHeaderPress(new(nextPoint.X + 30, nextPoint.Y));
+        Check(!window.Interaction.IsPinned && Math.Abs(window.VisibleFrame.X - droppedFrame.X - 30) < 2
+            && settings.Load().Position != droppedSettings,
+            "even a quick release-only movement is a drag and saves automatically");
+        var afterSwipe = settings.Load().Position;
+        nextPoint = TopPoint();
+        window.BeginHeaderPress(nextPoint, clickCount: 2);
+        window.EndHeaderPress(nextPoint);
+        Check(window.Interaction.IsPinned && settings.Load().Position == afterSwipe,
+            "a click after a drag cannot masquerade as the second half of a reset double-click");
+
+        foreach (var initiallyPinned in new[] { false, true })
+        {
+            window.SetSize(IslandSize.Percent125);
+            Expand();
+            if (window.Interaction.IsPinned != initiallyPinned) window.Interaction.TogglePin();
+            window.ApplyState(false);
+            window.UpdateLayout();
+            var anchor = TopPoint();
+            window.BeginHeaderPress(anchor);
+            window.EndHeaderPress(new(anchor.X + 35, anchor.Y + 65));
+            var beforeDouble = window.VisibleFrame;
+            var header = (Button)window.FindName("HeaderButton");
+            var leftEdge = header.PointToScreen(new Point(12, header.ActualHeight / 2));
+            var doublePoint = new PointD(leftEdge.X, leftEdge.Y);
+            window.BeginHeaderPress(doublePoint);
+            window.EndHeaderPress(doublePoint);
+            Check(window.Interaction.IsExpanded && window.VisibleFrame == beforeDouble
+                && window.Interaction.IsPinned != initiallyPinned,
+                $"first click on the expanded header edge preserves its geometry (initially pinned: {initiallyPinned})");
+            window.BeginHeaderPress(doublePoint, clickCount: 2);
+            window.EndHeaderPress(doublePoint);
+            var primary = IslandPlacement.Select(NativeMethods.Displays(), null);
+            Check(settings.Load().Position is null && !window.Interaction.IsExpanded && !window.Interaction.IsPinned
+                && window.Display.Id == primary.Id && Math.Abs(window.VisibleFrame.CenterX - primary.WorkArea.CenterX) < 2
+                && Math.Abs(window.VisibleFrame.Y - primary.WorkArea.Y) < 2,
+                $"double-click restores the primary display's initial position (initially pinned: {initiallyPinned})");
+            Check(settings.Load().DisplaySizes.GetValueOrDefault(primary.Id) == IslandSize.Percent125,
+                "double-click resets position while preserving display size preferences");
+        }
+        Expand();
+        var firstClick = TopPoint();
+        window.BeginHeaderPress(firstClick);
+        window.EndHeaderPress(firstClick);
+        window.BeginHeaderPress(firstClick, clickCount: 2);
+        window.EndHeaderPress(new(firstClick.X + 1, firstClick.Y));
+        Check(window.Interaction.IsExpanded && window.Interaction.IsPinned && settings.Load().Position is not null,
+            "movement during the second press takes precedence over double-click reset");
+        nextPoint = TopPoint();
+        window.BeginHeaderPress(nextPoint);
+        window.MoveHeaderPress(new(nextPoint.X + 10000, nextPoint.Y + 10000));
+        window.EndHeaderPress(new(nextPoint.X + 10000, nextPoint.Y + 10000));
+        var boundedFrame = window.VisibleFrame;
+        var workArea = window.Display.WorkArea;
+        Check(boundedFrame.X >= workArea.X && boundedFrame.Y >= workArea.Y
+            && boundedFrame.Right <= workArea.Right + 1 && boundedFrame.Bottom <= workArea.Bottom + 1,
+            "release constrains the expanded island to the destination work area");
+        Check(NativeMethods.GetForegroundWindow() != window.Handle, "dragging and double-click reset do not take foreground focus");
+        window.Interaction.SetMenuOpen(true);
+        if (Environment.GetEnvironmentVariable("CODEX_ISLAND_NATIVE_INPUT_TEST") == "1")
+            await NativeDragSmoke.RunAsync(window, settings, output);
         var closeProbe = new IslandWindow(store, settings, enablePolling: false);
         var closeHandled = false;
         closeProbe.Interaction.SetMenuOpen(true);

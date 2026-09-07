@@ -57,6 +57,8 @@ public partial class IslandWindow : Window
         // React on the input event; polling is only a fallback and handles leaving the island.
         MouseEnter += PointerEntered;
         MouseLeave += PointerLeft;
+        headerInputTimer = new(TimeSpan.FromMilliseconds(16), DispatcherPriority.Input, (_, _) => TrackHeaderPress(), Dispatcher);
+        headerInputTimer.Stop();
         if (initiallyExpanded) interaction.ToggleHeader();
         hoverTimer = new(TimeSpan.FromMilliseconds(50), DispatcherPriority.Input, (_, _) => CheckHover(), Dispatcher);
         pollTimer = new(TimeSpan.FromSeconds(30), DispatcherPriority.Background, async (_, _) => await store.RefreshAsync(scheduled: true), Dispatcher);
@@ -112,6 +114,7 @@ public partial class IslandWindow : Window
     {
         if (e.Mode == PowerModes.Resume) Dispatcher.BeginInvoke(async () =>
         {
+            CancelHeaderPress();
             RefreshEnvironment();
             if (enablePolling) await store.RefreshAsync();
         });
@@ -119,7 +122,7 @@ public partial class IslandWindow : Window
 
     internal void RefreshEnvironment()
     {
-        if (hwnd == 0 || dragging) return;
+        if (hwnd == 0 || dragging || headerGesture.IsPressed) return;
         var displays = NativeMethods.Displays();
         display = IslandPlacement.Select(displays, interaction.IsAdjusting ? display.Id : Settings.Position?.DisplayId ?? display.Id);
         uiScale = IslandPlacement.Scale(display, CurrentSize);
@@ -258,19 +261,19 @@ public partial class IslandWindow : Window
 
     private void CheckHover()
     {
-        if (!interaction.IsVisible || dragging) return;
+        if (!interaction.IsVisible || dragging || headerGesture.IsPressed) return;
         UpdateClickThrough();
         if (interaction.ObservePointer(visibleFrame.Union(targetFrame).Contains(NativeMethods.Pointer), clock.Elapsed.TotalSeconds)) ApplyState();
     }
     private void PointerEntered(object sender, MouseEventArgs e)
     {
-        if (hwnd != 0 && interaction.IsVisible && !dragging
+        if (hwnd != 0 && interaction.IsVisible && !dragging && !headerGesture.IsPressed
             && interaction.ObservePointer(true, clock.Elapsed.TotalSeconds)) ApplyState();
     }
     private void PointerLeft(object sender, MouseEventArgs e)
     {
         // Record brief exits too, including an exit/reentry between two polling ticks.
-        if (hwnd != 0 && interaction.IsVisible && !dragging && !visibleFrame.Contains(NativeMethods.Pointer)
+        if (hwnd != 0 && interaction.IsVisible && !dragging && !headerGesture.IsPressed && !visibleFrame.Contains(NativeMethods.Pointer)
             && interaction.ObservePointer(false, clock.Elapsed.TotalSeconds)) ApplyState();
     }
     internal void SetMenuOpen(bool open) => interaction.SetMenuOpen(open);
@@ -349,6 +352,7 @@ public partial class IslandWindow : Window
     }
     internal void ToggleVisibility()
     {
+        CancelHeaderPress();
         if (!interaction.IsVisible) { ShowIsland(); return; }
         if (interaction.IsAdjusting) CancelAdjustment();
         interaction.SetVisible(false);
@@ -360,6 +364,7 @@ public partial class IslandWindow : Window
 
     internal void BeginAdjustment()
     {
+        CancelHeaderPress();
         if (interaction.IsAdjusting) return;
         if (!interaction.IsVisible) ShowIsland();
         adjustmentOrigin = display;
@@ -387,6 +392,7 @@ public partial class IslandWindow : Window
     }
     internal void ResetPosition()
     {
+        CancelHeaderPress();
         if (!TrySave(Settings with { Position = null })) return;
         if (interaction.IsAdjusting) interaction.EndAdjustment();
         interaction.Collapse();
@@ -395,6 +401,7 @@ public partial class IslandWindow : Window
     }
     internal void SetSize(IslandSize size)
     {
+        CancelHeaderPress();
         if (interaction.IsAdjusting) return;
         var sizes = new Dictionary<string, IslandSize>(Settings.DisplaySizes);
         if (size == IslandSize.Automatic) sizes.Remove(display.Id); else sizes[display.Id] = size;
@@ -470,10 +477,9 @@ public partial class IslandWindow : Window
         topY = visibleFrame.Y;
     }
 
-    private void HeaderClicked(object sender, RoutedEventArgs e) { interaction.ToggleHeader(); ApplyState(); }
+    private void HeaderClicked(object sender, RoutedEventArgs e) { interaction.TogglePin(); ApplyState(); }
     private void PinClicked(object sender, RoutedEventArgs e) { interaction.TogglePin(); ApplyState(); }
     private void CollapseClicked(object sender, RoutedEventArgs e) { interaction.Collapse(); ApplyState(); }
-    private void MoveClicked(object sender, RoutedEventArgs e) => BeginAdjustment();
     private void DoneClicked(object sender, RoutedEventArgs e) => FinishAdjustment();
     private void CancelClicked(object sender, RoutedEventArgs e) => CancelAdjustment();
     private async void RefreshClicked(object sender, RoutedEventArgs e) => await store.RefreshAsync();
@@ -536,6 +542,7 @@ public partial class IslandWindow : Window
     internal void CloseForExit()
     {
         if (allowClose) return;
+        CancelHeaderPress();
         allowClose = true;
         StopAnimation();
         hoverTimer.Stop(); pollTimer.Stop(); labelTimer.Stop();

@@ -139,7 +139,10 @@
         <Border x:Name="IslandSurface" Background="#080A0C" BorderBrush="#282D31" BorderThickness="1" CornerRadius="0,0,17,17">
             <Grid x:Name="LayoutRoot" Height="336" Width="224" VerticalAlignment="Top" HorizontalAlignment="Center">
                 <Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="300" /></Grid.RowDefinitions>
-                <Button x:Name="HeaderButton" Click="HeaderClicked" ToolTip="点击固定或收起额度面板" AutomationProperties.Name="固定或收起额度面板">
+                <Button x:Name="HeaderButton" Click="HeaderClicked" ToolTip="按住拖动，松开保存；双击恢复默认位置；单击固定或取消固定"
+                        AutomationProperties.Name="固定或取消固定额度面板" AutomationProperties.HelpText="展开后按住顶部即可拖动，双击恢复默认位置"
+                        PreviewMouseLeftButtonDown="HeaderPressed" PreviewMouseMove="HeaderPointerMoved"
+                        PreviewMouseLeftButtonUp="HeaderReleased" LostMouseCapture="HeaderCaptureLost">
                     <Grid x:Name="CompactHeader" Width="210">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -196,7 +199,7 @@
                         </ItemsControl>
                         <Border Grid.Row="4" Background="#24292D" />
                         <Grid Grid.Row="6" VerticalAlignment="Center">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="122" /></Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="92" /></Grid.ColumnDefinitions>
                             <StackPanel>
                                 <StackPanel Orientation="Horizontal">
                                     <Ellipse x:Name="StatusDot" Width="4" Height="4" Fill="{StaticResource Mint}" Margin="0,0,6,0" />
@@ -207,7 +210,6 @@
                                 <TextBlock x:Name="LastUpdated" FontSize="11" LineHeight="16" LineStackingStrategy="BlockLineHeight" Foreground="#86929A" Margin="0,2,0,0" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                                <Button x:Name="MoveButton" Style="{StaticResource IconButton}" Content="&#xE8AB;" Click="MoveClicked" ToolTip="调整位置" AutomationProperties.Name="调整位置" />
                                 <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;" Click="RefreshClicked" ToolTip="立即刷新" AutomationProperties.Name="立即刷新额度" />
                                 <Button x:Name="PinButton" Style="{StaticResource IconButton}" Content="&#xE718;" Click="PinClicked" ToolTip="固定面板" AutomationProperties.Name="固定面板" />
                                 <Button x:Name="CollapseButton" Style="{StaticResource IconButton}" Content="&#xE70E;" Click="CollapseClicked" ToolTip="收起" AutomationProperties.Name="收起额度面板" />

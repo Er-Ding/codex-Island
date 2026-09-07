@@ -64,6 +64,7 @@ public sealed class IslandInteraction
         pending = null;
         lastInside = null;
     }
+    public void ResetPointerTracking() { pending = null; lastInside = null; }
     public void BeginAdjustment() { Collapse(); IsAdjusting = true; IsVisible = true; }
     public void EndAdjustment() { IsAdjusting = false; Collapse(); }
     public void SetVisible(bool visible)

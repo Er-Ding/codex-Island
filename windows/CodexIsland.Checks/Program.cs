@@ -17,6 +17,7 @@ internal static class Program
         ModelChecks();
         PlacementChecks();
         HoverChecks();
+        HeaderDragChecks();
         await StoreChecks();
         await TransportChecks();
         Console.WriteLine($"{passed} passed, {failed} failed.");
@@ -265,6 +266,115 @@ internal static class Program
                 Assert(rect.Width is >= 224 and <= 420 && rect.Height is >= 36 and <= 336 && rect.CenterX == 212);
             }
             Assert(a.Union(b).Contains(new(10, 300)));
+        });
+    }
+
+    private static void HeaderDragChecks()
+    {
+        Check("a stationary header press remains a click", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.IsPressed && !gesture.IsDragging);
+            Assert(!gesture.Move(new(100, 200)));
+            Assert(gesture.Release(new(100, 200)) == HeaderRelease.Click);
+            Assert(!gesture.IsPressed && !gesture.IsDragging);
+        });
+        Check("the first one-pixel movement starts dragging immediately", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Move(new(101, 200)));
+            Assert(gesture.IsPressed && gesture.IsDragging);
+            Assert(!gesture.Move(new(130, 220)));
+            Assert(gesture.Release(new(130, 220)) == HeaderRelease.Drag);
+            Assert(!gesture.IsPressed && !gesture.IsDragging);
+        });
+        Check("either movement axis and either direction can start dragging", () =>
+        {
+            foreach (var offset in new[] { new PointD(1, 0), new PointD(-1, 0), new PointD(0, 1), new PointD(0, -1) })
+            {
+                var gesture = new HeaderDragGesture();
+                gesture.Press(new(-500, -200));
+                Assert(gesture.Move(new(-500 + offset.X, -200 + offset.Y)));
+                Assert(gesture.Release(new(-500, -200)) == HeaderRelease.Drag);
+            }
+        });
+        Check("repeated stationary samples never turn a held press into a drag", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            for (var sample = 0; sample < 1000; sample++)
+                Assert(!gesture.Move(new(100, 200)) && !gesture.IsDragging);
+            Assert(gesture.Release(new(100, 200)) == HeaderRelease.Click);
+        });
+        Check("any actual coordinate change starts a drag without a distance threshold", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Move(new(100.01, 200)));
+            Assert(gesture.Release(new(100.01, 200)) == HeaderRelease.Drag);
+        });
+        Check("a press followed by a swipe and release is a drag", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Move(new(130, 200)));
+            Assert(gesture.Release(new(130, 200)) == HeaderRelease.Drag);
+        });
+        Check("moving away and back before release remains a drag", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Move(new(99, 200)));
+            Assert(!gesture.Move(new(100, 200)));
+            Assert(gesture.Release(new(100, 200)) == HeaderRelease.Drag);
+        });
+        Check("repeated move samples report a drag start exactly once", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Move(new(101, 200)));
+            Assert(!gesture.Move(new(101, 200)));
+            Assert(!gesture.Move(new(102, 200)));
+            Assert(gesture.IsDragging);
+            Assert(gesture.Release(new(102, 200)) == HeaderRelease.Drag);
+        });
+        Check("release samples final movement when a move event was not observed", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Release(new(101, 200)) == HeaderRelease.Drag);
+            Assert(!gesture.IsPressed && !gesture.IsDragging);
+            Assert(gesture.Release(new(101, 200)) == HeaderRelease.None);
+        });
+        Check("cancel clears pending and active gestures and a new press works", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            Assert(!gesture.Move(new(100, 200)));
+            Assert(gesture.Release(new(100, 200)) == HeaderRelease.None);
+            foreach (var startDrag in new[] { false, true })
+            {
+                gesture.Press(new(100, 200));
+                if (startDrag) Assert(gesture.Move(new(101, 200)));
+                gesture.Cancel();
+                Assert(!gesture.IsPressed && !gesture.IsDragging);
+                Assert(!gesture.Move(new(120, 200)));
+                Assert(gesture.Release(new(120, 200)) == HeaderRelease.None);
+                gesture.Press(new(200, 300));
+                Assert(gesture.Release(new(200, 300)) == HeaderRelease.Click);
+            }
+        });
+        Check("a replacement press resets its origin and movement history", () =>
+        {
+            var gesture = new HeaderDragGesture();
+            gesture.Press(new(100, 200));
+            Assert(gesture.Move(new(101, 200)));
+            gesture.Press(new(300, 400));
+            Assert(gesture.IsPressed && !gesture.IsDragging);
+            Assert(!gesture.Move(new(300, 400)));
+            Assert(gesture.Release(new(300, 400)) == HeaderRelease.Click);
+            Assert(gesture.Release(new(300, 400)) == HeaderRelease.None);
         });
     }
 
