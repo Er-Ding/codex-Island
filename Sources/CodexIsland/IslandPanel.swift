@@ -11,6 +11,7 @@ final class IslandState: ObservableObject {
     @Published var isExpanded = false
     @Published var isPinned = false
     @Published var isAdjustingPosition = false
+    @Published var isHeaderDragging = false
     @Published private(set) var collapseRevision = 0
     @Published var notchWidth: CGFloat = 180
     @Published var notchHeight: CGFloat = 32
@@ -32,25 +33,26 @@ final class IslandState: ObservableObject {
     func finishPositionAdjustment() { onFinishPositionAdjustment?() }
     func cancelPositionAdjustment() { onCancelPositionAdjustment?() }
 
+    func cancelPendingHover() { hoverTask?.cancel() }
+
     func setHover(_ hovering: Bool) {
         hoverTask?.cancel()
-        guard !isPinned, !isAdjustingPosition, isExpanded != hovering else { return }
+        guard !isPinned, !isAdjustingPosition, !isHeaderDragging, isExpanded != hovering else { return }
         hoverTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: hovering ? 100_000_000 : 280_000_000)
-            guard !Task.isCancelled, let self, !self.isPinned, !self.isAdjustingPosition else { return }
+            guard !Task.isCancelled, let self, !self.isPinned,
+                  !self.isAdjustingPosition, !self.isHeaderDragging else { return }
             self.isExpanded = hovering
         }
     }
 
-    func toggleExpanded() {
-        guard !isAdjustingPosition else { return }
+    func togglePinned() {
+        guard !isAdjustingPosition, !isHeaderDragging else { return }
         hoverTask?.cancel()
-        if isPinned {
-            collapse()
-        } else {
-            isPinned = true
-            isExpanded = true
-        }
+        // Keep both ends of the expanded header available for a second click.
+        // Unpinning allows hover exit to collapse it, rather than moving it now.
+        isPinned.toggle()
+        isExpanded = true
     }
 
     func collapse() {
@@ -100,11 +102,13 @@ private struct IslandFrameTransition {
 /// A mouse-interactive panel which never takes keyboard focus from the current app.
 final class IslandPanel: NSPanel {
     let positionDrag = IslandPositionDrag()
+    let headerDrag = IslandHeaderDrag()
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
+        if headerDrag.handle(event, in: self) { return }
         if positionDrag.handle(event, in: self) { return }
         super.sendEvent(event)
     }
@@ -130,6 +134,7 @@ final class IslandPanelController {
     private var topY: CGFloat = 0
     private var activeScreen: NSScreen?
     private var adjustmentOriginDisplayID: String?
+    private var headerPressOriginDisplayID: String?
     private let positionStore = IslandPositionStore()
     private let sizeStore = IslandSizeStore()
     private var savedPosition: SavedIslandPosition?
@@ -195,6 +200,14 @@ final class IslandPanelController {
         state.onBeginPositionAdjustment = { [weak self] in self?.beginPositionAdjustment() }
         state.onFinishPositionAdjustment = { [weak self] in self?.finishPositionAdjustment() }
         state.onCancelPositionAdjustment = { [weak self] in self?.cancelPositionAdjustment() }
+        panel.headerDrag.canDrag = { [weak self] in self?.canBeginHeaderPress == true }
+        panel.headerDrag.onBeginPress = { [weak self] in self?.beginHeaderPress() == true }
+        panel.headerDrag.onDrag = { [weak self] in
+            guard let self else { return }
+            if !self.state.isHeaderDragging { self.state.isHeaderDragging = true }
+            self.captureDraftPosition()
+        }
+        panel.headerDrag.onEndPress = { [weak self] completion in self?.finishHeaderPress(completion) }
 
         // Published values are emitted before mutation. Deliver on the next main
         // run-loop pass so the window is sized from the updated view state.
@@ -202,7 +215,7 @@ final class IslandPanelController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                guard !self.state.isAdjustingPosition else { return }
+                guard !self.state.isAdjustingPosition, !self.panel.headerDrag.isPressed else { return }
                 let wasPinned = self.previouslyPinned
                 self.previouslyPinned = self.state.isPinned
                 self.updateFrame(animated: true)
@@ -233,6 +246,7 @@ final class IslandPanelController {
     }
 
     func hide() {
+        panel.headerDrag.cancel()
         if state.isAdjustingPosition { cancelPositionAdjustment() }
         isVisible = false
         stopHoverMonitoring()
@@ -247,6 +261,7 @@ final class IslandPanelController {
 
     func close() {
         isVisible = false
+        panel.headerDrag.cancel()
         panel.positionDrag.isEnabled = false
         stopHoverMonitoring()
         stateSubscription?.cancel()
@@ -262,13 +277,92 @@ final class IslandPanelController {
 
     private var desiredFrame: NSRect {
         let frame = NSRect(x: centerX - state.width / 2, y: topY - state.height, width: state.width, height: state.height)
-        if (savedPosition != nil || state.isAdjustingPosition), let screen = activeScreen {
+        if (savedPosition != nil || state.isAdjustingPosition || state.isHeaderDragging), let screen = activeScreen {
             return IslandPlacement.clampedFrame(frame, in: screen.frame, notchRect: Self.notchRect(on: screen))
         }
         return frame
     }
 
+    private var canBeginHeaderPress: Bool {
+        isVisible && panel.isVisible && state.isExpanded && !state.isAdjustingPosition
+            && !menuIsTracking && !panel.positionDrag.isDragging
+    }
+
+    private func beginHeaderPress() -> Bool {
+        guard canBeginHeaderPress else { return false }
+        headerPressOriginDisplayID = activeScreen.map(Self.screenID)
+        stopHoverMonitoring()
+        // Finish the reveal and discard its transparent animation canvas before
+        // the gesture records an origin. The entire expanded panel moves as one.
+        updateFrame(animated: false)
+        return true
+    }
+
+    private func finishHeaderPress(_ completion: IslandHeaderDrag.Completion) {
+        switch completion {
+        case .drag:
+            // The gesture has released its anchor, so destination-display sizing
+            // can now run without shifting the content under the held pointer.
+            captureDraftPosition()
+            updateScreenGeometry()
+            updateFrame(animated: false)
+            if let screen = activeScreen {
+                centerX = panel.frame.midX
+                topY = panel.frame.maxY
+                let position = SavedIslandPosition(displayID: Self.screenID(screen),
+                    frame: panel.frame, screenFrame: screen.frame)
+                positionStore.save(position)
+                savedPosition = position
+            }
+            state.isHeaderDragging = false
+
+        case .click:
+            restoreHeaderPressPlacement()
+            state.togglePinned()
+            updateFrame(animated: false)
+
+        case .doubleClick:
+            state.isHeaderDragging = false
+            resetPosition()
+
+        case .cancelled:
+            // Interrupted mouse sequences are drafts, never saved placements.
+            restoreHeaderPressPlacement()
+        }
+        headerPressOriginDisplayID = nil
+        resumeHoverAfterHeaderPress()
+    }
+
+    private func restoreHeaderPressPlacement() {
+        state.isHeaderDragging = false
+        if savedPosition == nil {
+            activeScreen = NSScreen.screens.first { Self.screenID($0) == headerPressOriginDisplayID }
+                ?? Self.preferredScreen()
+        }
+        updateScreenGeometry()
+        updateFrame(animated: false)
+    }
+
+    private func resumeHoverAfterHeaderPress() {
+        state.cancelPendingHover()
+        hoverTracking = IslandHoverTracking()
+        if !state.isExpanded {
+            // Reset may land directly under the pointer. Require a fresh entry
+            // before expanding again so a double-click stays visibly collapsed.
+            _ = hoverTracking.update(pointer: NSEvent.mouseLocation,
+                region: isVisible ? presentation.geometry.visibleFrame : nil)
+        }
+        if isVisible {
+            startHoverMonitoring()
+            // Destination scaling/clamping or cancellation can leave the panel
+            // away from the pointer. A fresh outside sample must still schedule
+            // collapse even though the tracker also starts outside.
+            if state.isExpanded { checkHover(force: true) }
+        }
+    }
+
     func beginPositionAdjustment() {
+        panel.headerDrag.cancel()
         guard !state.isAdjustingPosition else { return }
         if !isVisible { show() }
         adjustmentOriginDisplayID = activeScreen.map(Self.screenID)
@@ -309,9 +403,10 @@ final class IslandPanelController {
     }
 
     func resetPosition() {
+        panel.headerDrag.cancel()
         positionStore.reset()
         savedPosition = nil
-        activeScreen = nil
+        activeScreen = Self.preferredScreen()
         if state.isAdjustingPosition {
             endPositionAdjustment()
         } else {
@@ -324,6 +419,7 @@ final class IslandPanelController {
     }
 
     func setSizePreference(_ preference: IslandSizePreference) {
+        panel.headerDrag.cancel()
         guard !state.isAdjustingPosition, let screen = activeScreen else { return }
         sizeStore.save(preference, displayID: Self.screenID(screen))
         screenEnvironmentChanged()
@@ -343,17 +439,30 @@ final class IslandPanelController {
     }
 
     private func captureDraftPosition() {
-        guard state.isAdjustingPosition else { return }
+        guard state.isAdjustingPosition || state.isHeaderDragging else { return }
         let frame = panel.frame
-        activeScreen = NSScreen.screens.max { first, second in
-            let a = first.frame.intersection(frame), b = second.frame.intersection(frame)
-            return a.width * a.height < b.width * b.height
-        } ?? activeScreen
+        activeScreen = screenContainingMost(of: frame) ?? activeScreen
         centerX = frame.midX
         topY = frame.maxY
         // Update the appearance while dragging without resizing the window or
         // changing the drag anchor. Both local frame offsets remain zero.
         presentation.geometry = presentationGeometry(visible: frame, canvas: frame)
+        targetFrame = frame
+    }
+
+    private func screenContainingMost(of frame: NSRect) -> NSScreen? {
+        func overlap(_ screen: NSScreen) -> CGFloat {
+            let intersection = screen.frame.intersection(frame)
+            return intersection.isNull ? 0 : intersection.width * intersection.height
+        }
+        // Prefer the current display on a tie, including a frame temporarily
+        // outside every display. Motion itself remains entirely unconstrained.
+        var best = NSScreen.screens.first { Self.screenID($0) == activeScreen.map(Self.screenID) }
+        for screen in NSScreen.screens {
+            if let current = best, overlap(screen) <= overlap(current) { continue }
+            best = screen
+        }
+        return best
     }
 
     private func settleDraftPosition() {
@@ -381,13 +490,15 @@ final class IslandPanelController {
     }
 
     private func stopHoverMonitoring() {
+        state.cancelPendingHover()
         hoverTimer?.invalidate()
         hoverTimer = nil
         hoverTracking = IslandHoverTracking()
     }
 
     private func checkHover(force: Bool = false) {
-        guard hoverTimer != nil, isVisible, panel.isVisible, !menuIsTracking, !state.isAdjustingPosition else { return }
+        guard hoverTimer != nil, isVisible, panel.isVisible, !menuIsTracking,
+              !state.isAdjustingPosition, !panel.headerDrag.isPressed else { return }
         updateMousePassthrough()
         // The animation canvas also contains transparent space, which is not
         // part of the island. Only the visible shape and its destination count.
@@ -477,6 +588,7 @@ final class IslandPanelController {
             panel.displayIfNeeded()
             CATransaction.commit()
         }
+        if frameTransition == nil { panel.headerDrag.refreshCursor() }
         updateMousePassthrough()
     }
 
@@ -502,15 +614,16 @@ final class IslandPanelController {
     private func updateScreenGeometry() {
         // Keep the current display when a menu or System Settings changes the
         // active app's screen; screen-specific sizing must not relocate the island.
-        let requestedID = state.isAdjustingPosition ? activeScreen.map(Self.screenID)
+        let isMoving = state.isAdjustingPosition || state.isHeaderDragging
+        let requestedID = isMoving ? activeScreen.map(Self.screenID)
             : (savedPosition?.displayID ?? activeScreen.map(Self.screenID))
         guard let screen = NSScreen.screens.first(where: { Self.screenID($0) == requestedID }) ?? Self.preferredScreen() else { return }
         activeScreen = screen
-        if state.isAdjustingPosition || savedPosition != nil {
+        if isMoving || savedPosition != nil {
             state.notchHeight = 0
             state.notchWidth = 0
             updateUIScale(on: screen)
-            if !state.isAdjustingPosition, let position = savedPosition {
+            if !isMoving, let position = savedPosition {
                 // Retain the saved anchor when expanded so collapsing returns to it.
                 let frame = position.frame(in: screen.frame, size: CGSize(width: state.compactWidth, height: state.headerHeight))
                 centerX = frame.midX
@@ -560,11 +673,9 @@ final class IslandPanelController {
     }
 
     static func preferredScreen() -> NSScreen? {
-        let screens = NSScreen.screens
-        return screens.first { isBuiltIn($0) && $0.safeAreaInsets.top > 0 }
-            ?? screens.first { isBuiltIn($0) }
-            ?? NSScreen.main
-            ?? screens.first
+        // The first NSScreen is the primary/menu-bar display. NSScreen.main
+        // follows keyboard focus and could reset onto an unrelated display.
+        NSScreen.screens.first ?? NSScreen.main
     }
 
     static func isBuiltIn(_ screen: NSScreen) -> Bool {
@@ -591,6 +702,7 @@ final class IslandPanelController {
             Task { @MainActor in
                 guard let self else { return }
                 self.menuIsTracking = true
+                self.panel.headerDrag.cancel()
                 // Cancel an already scheduled exit while choosing a menu item.
                 if self.isVisible && self.state.isExpanded { self.state.setHover(true) }
             }
@@ -624,12 +736,16 @@ final class IslandPanelController {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+                self?.panel.headerDrag.cancel()
                 self?.updateFrame(animated: false)
             }
         })
         for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.screensDidWakeNotification] {
             workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.screenEnvironmentChanged() }
+                Task { @MainActor in
+                    self?.panel.headerDrag.cancel()
+                    self?.screenEnvironmentChanged()
+                }
             })
         }
         workspaceObservers.append(center.addObserver(
@@ -638,16 +754,23 @@ final class IslandPanelController {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.panel.headerDrag.cancel()
                 self?.screenEnvironmentChanged()
                 self?.store.refresh()
             }
         })
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.panel.headerDrag.cancel() }
+            })
+        }
     }
 
     private func screenEnvironmentChanged() {
         // Screen/backing notifications also fire during cross-display drags.
-        // settleDraftPosition will pick up the latest geometry on mouse-up.
-        guard !panel.positionDrag.isDragging else { return }
+        // The release handler will pick up the latest geometry on mouse-up.
+        guard !panel.positionDrag.isDragging, !panel.headerDrag.isPressed else { return }
         if state.isAdjustingPosition {
             settleDraftPosition()
             return

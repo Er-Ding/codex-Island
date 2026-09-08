@@ -56,12 +56,16 @@ struct IslandView: View {
                     }
                 }
                 .frame(width: size.width, height: state.headerHeight)
+                .overlay {
+                    if !state.isAdjustingPosition { HeaderDragHandle() }
+                }
             }
             .frame(width: size.width, height: size.height, alignment: .top)
             .background(outline.fill(Color(white: 0.025)))
             .overlay {
                 border
-                    .stroke(state.isAdjustingPosition ? mint.opacity(0.55) : Color.white.opacity(0.085), lineWidth: s(1))
+                    .stroke(state.isAdjustingPosition || state.isHeaderDragging
+                            ? mint.opacity(0.55) : Color.white.opacity(0.085), lineWidth: s(1))
                     .allowsHitTesting(false)
             }
             .clipShape(outline)
@@ -154,10 +158,17 @@ struct IslandView: View {
         }
         .padding(.horizontal, s(5))
         .contentShape(Rectangle())
-        .onTapGesture { state.toggleExpanded() }
-        .help(state.isPinned ? "点击收起" : "点击固定额度面板")
+        .onTapGesture {
+            // Expanded-header mouse sequences belong to IslandPanel so dragging
+            // and double-clicks never reach this fallback. A compact press may
+            // finish after hover has expanded the panel; it must still pin it.
+            state.togglePinned()
+        }
+        .help(state.isExpanded
+              ? "拖动顶部移动，双击恢复主屏顶部位置；单击\(state.isPinned ? "取消固定" : "固定面板")"
+              : "点击固定额度面板")
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction { state.toggleExpanded() }
+        .accessibilityAction { state.togglePinned() }
     }
 
     private func compactValue(_ window: QuotaWindow?, symbol: String?, label: String, showPeriod: Bool = true) -> some View {
@@ -234,16 +245,9 @@ struct IslandView: View {
 
             HStack(alignment: .center, spacing: s(8)) {
                 statusText
-                    .frame(width: max(0, contentWidth - s(135)), alignment: .leading)
+                    .frame(width: max(0, contentWidth - s(102)), alignment: .leading)
 
                 HStack(spacing: s(5)) {
-                    Button { state.beginPositionAdjustment() } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .frame(width: s(28), height: s(28))
-                    }
-                    .help("调整位置")
-                    .accessibilityLabel("调整灵动岛位置")
-
                     Button { store.refresh() } label: {
                         if store.isRefreshing {
                             ProgressView()
@@ -258,7 +262,7 @@ struct IslandView: View {
                     .help("立即刷新")
                     .accessibilityLabel("立即刷新额度")
 
-                    Button { state.isPinned.toggle() } label: {
+                    Button { state.togglePinned() } label: {
                         Image(systemName: state.isPinned ? "pin.fill" : "pin")
                             .foregroundStyle(state.isPinned ? mint : Color.white.opacity(0.55))
                             .frame(width: s(28), height: s(28))
@@ -283,7 +287,7 @@ struct IslandView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: s(12), weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.55))
-                .frame(width: s(127))
+                .frame(width: s(94))
             }
             .frame(width: contentWidth, height: s(52), alignment: .topLeading)
         }
