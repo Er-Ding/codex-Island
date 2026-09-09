@@ -6,9 +6,21 @@ struct QuotaWindow: Codable, Equatable {
     var resetsAt: Double?
 
     var remainingPercent: Double { max(0, min(100, 100 - usedPercent)) }
+    private var isWeekly: Bool { windowDurationMins == 10_080 }
+
+    private static let beijingResetFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        // Keep Beijing time and the 24-hour clock independent of macOS settings.
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter
+    }()
+
     var periodTitle: String {
         guard let minutes = windowDurationMins, minutes > 0 else { return "当前周期" }
-        if minutes == 10_080 { return "本周" }
+        if isWeekly { return "本周" }
         if minutes % 1440 == 0 { return "\(minutes / 1440)天" }
         if minutes % 60 == 0 { return "\(minutes / 60)小时" }
         return "\(minutes)分钟"
@@ -17,6 +29,10 @@ struct QuotaWindow: Codable, Equatable {
         guard let reset = resetsAt else { return "恢复时间暂未提供" }
         let remaining = reset - now.timeIntervalSince1970
         guard remaining > 0 else { return "已到恢复时间，等待刷新" }
+        if isWeekly {
+            let date = Self.beijingResetFormatter.string(from: Date(timeIntervalSince1970: reset))
+            return "北京时间 \(date) 刷新"
+        }
         let minutes = max(1, Int(ceil(remaining / 60)))
         if minutes >= 1440 { return "\(minutes / 1440)天\((minutes % 1440) / 60)小时后恢复" }
         if minutes >= 60 { return "\(minutes / 60)小时\(minutes % 60)分钟后恢复" }
