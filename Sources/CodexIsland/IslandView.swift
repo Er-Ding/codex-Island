@@ -56,9 +56,6 @@ struct IslandView: View {
                     }
                 }
                 .frame(width: size.width, height: state.headerHeight)
-                .overlay {
-                    if !state.isAdjustingPosition { HeaderDragHandle() }
-                }
             }
             .frame(width: size.width, height: size.height, alignment: .top)
             .background(outline.fill(Color(white: 0.025)))
@@ -158,15 +155,11 @@ struct IslandView: View {
         }
         .padding(.horizontal, s(5))
         .contentShape(Rectangle())
-        .onTapGesture {
-            // Expanded-header mouse sequences belong to IslandPanel so dragging
-            // and double-clicks never reach this fallback. A compact press may
-            // finish after hover has expanded the panel; it must still pin it.
-            state.togglePinned()
-        }
+        // The panel owns presses in both compact and expanded states. Keeping
+        // a separate SwiftUI tap here would lose presses during hover expansion.
         .help(state.isExpanded
               ? "拖动顶部移动，双击恢复主屏顶部位置；单击\(state.isPinned ? "取消固定" : "固定面板")"
-              : "点击固定额度面板")
+              : "点击固定额度面板，按住顶部直接拖动")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { state.togglePinned() }
     }

@@ -1,57 +1,8 @@
 import AppKit
 import CoreGraphics
-import SwiftUI
 
-/// Marks the header without taking hit testing away from its SwiftUI content.
-struct HeaderDragHandle: NSViewRepresentable {
-    func makeNSView(context: Context) -> HeaderDragView {
-        HeaderDragView()
-    }
-
-    func updateNSView(_ nsView: HeaderDragView, context: Context) {
-        nsView.window?.invalidateCursorRects(for: nsView)
-    }
-
-    static func dismantleNSView(_ nsView: HeaderDragView, coordinator: ()) {
-        nsView.unregister()
-    }
-}
-
-final class HeaderDragView: NSView {
-    fileprivate weak var dragController: IslandHeaderDrag?
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override var mouseDownCanMoveWindow: Bool { false }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        guard dragController?.canDrag?() == true else { return }
-        addCursorRect(bounds, cursor: dragController?.isDragging == true ? .closedHand : .openHand)
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        unregister()
-        guard let panel = window as? IslandPanel else { return }
-        dragController = panel.headerDrag
-        panel.headerDrag.register(self)
-    }
-
-    override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if newWindow !== window { unregister() }
-        super.viewWillMove(toWindow: newWindow)
-    }
-
-    fileprivate func unregister() {
-        // Clear the reference first: cancellation can synchronously change the
-        // SwiftUI hierarchy and call this method again.
-        let controller = dragController
-        dragController = nil
-        controller?.unregister(self)
-    }
-}
-
-/// Routes an expanded-header mouse sequence before SwiftUI sees its clicks.
+/// Routes header input using the visible island's geometry, independently of
+/// SwiftUI layout and view replacement during expansion.
 @MainActor
 final class IslandHeaderDrag {
     enum Completion {
@@ -74,9 +25,11 @@ final class IslandHeaderDrag {
     private struct DragAnchor {
         let pointer: CGPoint
         let origin: CGPoint
+        let pressedHeaderFrame: NSRect
     }
 
-    private weak var handleView: HeaderDragView?
+    private weak var headerWindow: NSWindow?
+    private var headerFrame: NSRect = .zero
     private weak var draggingWindow: NSWindow?
     private var anchor: DragAnchor?
     private var consumesMouseUp = false
@@ -84,26 +37,24 @@ final class IslandHeaderDrag {
     private var doubleClickCandidate = false
     private var ownsCursor = false
     private var sequenceRevision: UInt = 0
-    private var registrationRevision: UInt = 0
 
-    fileprivate func register(_ view: HeaderDragView) {
-        guard handleView !== view else { return }
-        registrationRevision &+= 1
-        let revision = registrationRevision
-        handleView = nil
-        cancel()
-        // A cancellation callback may itself install a replacement header.
-        guard revision == registrationRevision, view.dragController === self,
-              view.window != nil else { return }
-        handleView = view
-        view.window?.invalidateCursorRects(for: view)
+    /// The controller supplies screen coordinates in the same transaction as
+    /// drawing the header. A layout change never cancels an active press.
+    func updateHeaderFrame(_ frame: NSRect, in window: NSWindow) {
+        headerWindow = window
+        headerFrame = frame
+        if !isDragging { refreshCursor() }
     }
 
-    fileprivate func unregister(_ view: HeaderDragView) {
-        guard handleView === view else { return }
-        registrationRevision &+= 1
-        handleView = nil
-        cancel()
+    /// Called by the stable hosting view, so cursors need no SwiftUI marker.
+    func addCursorRect(to view: NSView) {
+        guard let window = headerWindow, view.window === window,
+              window.isVisible, !view.isHiddenOrHasHiddenAncestor,
+              canDrag?() == true, isValidHeaderFrame else { return }
+        let region = view.convert(window.convertFromScreen(headerFrame), from: nil)
+            .intersection(view.bounds)
+        guard !region.isEmpty, !region.isNull else { return }
+        view.addCursorRect(region, cursor: isDragging ? .closedHand : .openHand)
     }
 
     /// Cancelled sequences still own their matching mouse-up, so it cannot
@@ -128,28 +79,50 @@ final class IslandHeaderDrag {
             consumesMouseUp = false
             let candidate = precedingHeaderClick && event.clickCount == 2
             precedingHeaderClick = false
-            guard let view = handleView, view.window === window,
-                  !view.isHiddenOrHasHiddenAncestor, window.isVisible else { return false }
-            let region = view.convert(view.bounds, to: nil)
-            guard containsIncludingEdges(region, event.locationInWindow) else { return false }
-
             // Read the event's global point before settling the canvas. Its
             // locationInWindow belongs to the frame that received the event.
-            guard let pointer = screenPoint(for: event) else { return false }
+            guard let pointer = screenPoint(for: event),
+                  headerContains(pointer, in: window) else { return false }
+
+            // Own the sequence before the callback can expand or lay out the
+            // island. The controller can now suspend hover on this same down.
+            sequenceRevision &+= 1
             let revision = sequenceRevision
-            guard onBeginPress?() == true else { return false }
-            guard revision == sequenceRevision, handleView === view,
-                  view.window === window, !view.isHiddenOrHasHiddenAncestor,
-                  window.isVisible else {
-                consumesMouseUp = true
-                onEndPress?(.cancelled)
-                return true
-            }
+            let pressedHeaderFrame = headerFrame
             draggingWindow = window
-            anchor = DragAnchor(pointer: pointer, origin: window.frame.origin)
+            anchor = DragAnchor(
+                pointer: pointer,
+                origin: window.frame.origin,
+                pressedHeaderFrame: pressedHeaderFrame
+            )
             isDragging = false
             doubleClickCandidate = candidate
             consumesMouseUp = true
+            let accepted = onBeginPress?() == true
+            guard revision == sequenceRevision, isPressed else {
+                // An explicit cancellation already delivered its completion.
+                consumesMouseUp = true
+                return true
+            }
+            guard accepted else {
+                anchor = nil
+                draggingWindow = nil
+                doubleClickCandidate = false
+                consumesMouseUp = false
+                refreshCursor()
+                return false
+            }
+            guard window.isVisible else {
+                cancel()
+                return true
+            }
+            // Expansion may have changed the canvas. Keep the original event
+            // point, paired with the new origin, to prevent an initial jump.
+            anchor = DragAnchor(
+                pointer: pointer,
+                origin: window.frame.origin,
+                pressedHeaderFrame: pressedHeaderFrame
+            )
             refreshCursor()
             return true
 
@@ -171,14 +144,17 @@ final class IslandHeaderDrag {
             }
             moveWindow(to: pointer)
             // Cancellation may have happened while handling the last move.
-            guard isPressed else {
+            guard let anchor else {
                 consumesMouseUp = false
                 return true
             }
             let completion: Completion
             if isDragging {
                 completion = .drag
-            } else if headerContains(pointer, in: window) {
+            } else if headerContains(pointer, in: window)
+                        || containsIncludingEdges(anchor.pressedHeaderFrame, pointer) {
+                // Expanding near a screen edge can move the header. Layout
+                // must not cancel an accepted click whose pointer stayed still.
                 completion = doubleClickCandidate ? .doubleClick : .click
             } else {
                 completion = .cancelled
@@ -187,9 +163,9 @@ final class IslandHeaderDrag {
             return true
 
         case .mouseMoved:
-            // A normal move means a mouse-up was lost. Synthetic and remote
-            // input may not update NSEvent.pressedMouseButtons reliably.
-            if isPressed { cancel() }
+            // Remote input can interleave ordinary moves with a held button.
+            // Only explicit cancellation or mouse-up ends the owned sequence.
+            refreshCursor()
             return false
 
         case .keyDown where event.keyCode == 53:
@@ -207,23 +183,25 @@ final class IslandHeaderDrag {
     }
 
     func refreshCursor() {
-        guard let view = handleView, let window = view.window else {
+        // Dragging only translates the window, preserving local cursor rects.
+        // Avoid rebuilding the whole hosting view's rects on every movement.
+        if isDragging {
+            setCursor(.closedHand)
+            return
+        }
+        guard let window = headerWindow else {
             releaseCursor()
             return
         }
-        window.invalidateCursorRects(for: view)
-        if isDragging {
-            setCursor(.closedHand)
+        if let view = window.contentView {
+            window.invalidateCursorRects(for: view)
+        }
+        let canGrab = canDrag?() == true
+            && headerContains(NSEvent.mouseLocation, in: window)
+        if canGrab {
+            setCursor(.openHand)
         } else {
-            let pointer = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            let canGrab = canDrag?() == true && window.isVisible
-                && !view.isHiddenOrHasHiddenAncestor
-                && containsIncludingEdges(view.bounds, pointer)
-            if canGrab {
-                setCursor(.openHand)
-            } else {
-                releaseCursor()
-            }
+            releaseCursor()
         }
     }
 
@@ -254,10 +232,14 @@ final class IslandHeaderDrag {
     }
 
     private func headerContains(_ pointer: CGPoint, in window: NSWindow) -> Bool {
-        guard let view = handleView, view.window === window,
-              !view.isHiddenOrHasHiddenAncestor, window.isVisible else { return false }
-        let region = view.convert(view.bounds, to: nil)
-        return containsIncludingEdges(window.convertToScreen(region), pointer)
+        headerWindow === window && window.isVisible && isValidHeaderFrame
+            && containsIncludingEdges(headerFrame, pointer)
+    }
+
+    private var isValidHeaderFrame: Bool {
+        headerFrame.origin.x.isFinite && headerFrame.origin.y.isFinite
+            && headerFrame.width.isFinite && headerFrame.height.isFinite
+            && headerFrame.width > 0 && headerFrame.height > 0
     }
 
     private func moveWindow(to pointer: CGPoint) {
@@ -300,7 +282,6 @@ final class IslandHeaderDrag {
             precedingHeaderClick = false
         }
         // Clear ownership before callbacks, which can remove the header.
-        refreshCursor()
         onEndPress?(completion)
         refreshCursor()
     }

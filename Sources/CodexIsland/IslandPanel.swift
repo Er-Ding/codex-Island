@@ -121,10 +121,19 @@ final class IslandPanel: NSPanel {
 
 private final class IslandHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        (window as? IslandPanel)?.headerDrag.addCursorRect(to: self)
+    }
 }
 
 @MainActor
 final class IslandPanelController {
+    // Keep the island above the menu bar/status surfaces across app switches,
+    // while allowing its native quota and status-item menus to open above it.
+    private static let overlayLevel = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1)
+
     let state: IslandState
     private let presentation = IslandPresentation()
     private let store: QuotaStore
@@ -177,13 +186,16 @@ final class IslandPanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        panel.level = .statusBar
         panel.isFloatingPanel = true
+        panel.level = Self.overlayLevel
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.acceptsMouseMovedEvents = true
+        // Keep reception enabled throughout expansion. Polling the pointer to
+        // toggle this flag can drop a fast mouse-down before the next sample.
+        panel.ignoresMouseEvents = false
         panel.isReleasedWhenClosed = false
         panel.animationBehavior = .none
         panel.preservesContentDuringLiveResize = false
@@ -233,7 +245,7 @@ final class IslandPanelController {
 
         observeScreenChanges()
         updateFrame(animated: false)
-        panel.orderFrontRegardless()
+        maintainWindowOrdering()
         startHoverMonitoring()
     }
 
@@ -241,7 +253,7 @@ final class IslandPanelController {
         isVisible = true
         updateScreenGeometry()
         updateFrame(animated: false)
-        panel.orderFrontRegardless()
+        maintainWindowOrdering()
         startHoverMonitoring()
     }
 
@@ -257,6 +269,14 @@ final class IslandPanelController {
 
     func toggleVisibility() {
         isVisible ? hide() : show()
+    }
+
+    private func maintainWindowOrdering() {
+        guard isVisible else { return }
+        if panel.level != Self.overlayLevel { panel.level = Self.overlayLevel }
+        // Reorder without activating the app, stealing focus, resizing the
+        // canvas, or changing the current expansion/drag/hover state.
+        panel.orderFrontRegardless()
     }
 
     func close() {
@@ -284,7 +304,7 @@ final class IslandPanelController {
     }
 
     private var canBeginHeaderPress: Bool {
-        isVisible && panel.isVisible && state.isExpanded && !state.isAdjustingPosition
+        isVisible && panel.isVisible && !state.isAdjustingPosition
             && !menuIsTracking && !panel.positionDrag.isDragging
     }
 
@@ -292,9 +312,15 @@ final class IslandPanelController {
         guard canBeginHeaderPress else { return false }
         headerPressOriginDisplayID = activeScreen.map(Self.screenID)
         stopHoverMonitoring()
-        // Finish the reveal and discard its transparent animation canvas before
-        // the gesture records an origin. The entire expanded panel moves as one.
-        updateFrame(animated: false)
+        // A press can precede the hover delay or arrive during the reveal. Own
+        // that same sequence immediately; pinning still happens only on click-up.
+        if !state.isExpanded { state.isExpanded = true }
+        // An already expanded panel needs no synchronous layout/redraw before
+        // its first move. Only settle if there is still a reveal to finish.
+        if frameTransition != nil || presentation.geometry.visibleFrame != desiredFrame
+            || presentation.geometry.canvasFrame != desiredFrame {
+            updateFrame(animated: false)
+        }
         return true
     }
 
@@ -413,7 +439,7 @@ final class IslandPanelController {
             state.collapse()
             updateScreenGeometry()
             updateFrame(animated: false)
-            if isVisible { panel.orderFrontRegardless() }
+            maintainWindowOrdering()
             checkHover()
         }
     }
@@ -433,7 +459,7 @@ final class IslandPanelController {
         adjustmentOriginDisplayID = nil
         updateFrame(animated: false)
         if isVisible {
-            panel.orderFrontRegardless()
+            maintainWindowOrdering()
             startHoverMonitoring()
         }
     }
@@ -441,12 +467,17 @@ final class IslandPanelController {
     private func captureDraftPosition() {
         guard state.isAdjustingPosition || state.isHeaderDragging else { return }
         let frame = panel.frame
+        // Header dragging reports each move synchronously; didMove may report
+        // that same frame again on the next run-loop pass.
+        guard presentation.geometry.visibleFrame != frame
+            || presentation.geometry.canvasFrame != frame else { return }
         activeScreen = screenContainingMost(of: frame) ?? activeScreen
         centerX = frame.midX
         topY = frame.maxY
         // Update the appearance while dragging without resizing the window or
         // changing the drag anchor. Both local frame offsets remain zero.
         presentation.geometry = presentationGeometry(visible: frame, canvas: frame)
+        updateHeaderInteraction(visible: frame)
         targetFrame = frame
     }
 
@@ -457,7 +488,13 @@ final class IslandPanelController {
         }
         // Prefer the current display on a tie, including a frame temporarily
         // outside every display. Motion itself remains entirely unconstrained.
-        var best = NSScreen.screens.first { Self.screenID($0) == activeScreen.map(Self.screenID) }
+        let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
+        let currentNumber = activeScreen?.deviceDescription[screenNumberKey] as? NSNumber
+        // Use the numeric ID for this per-move comparison; the persistent UUID
+        // only needs to be encoded when the final position is saved.
+        var best = NSScreen.screens.first {
+            ($0.deviceDescription[screenNumberKey] as? NSNumber) == currentNumber
+        }
         for screen in NSScreen.screens {
             if let current = best, overlap(screen) <= overlap(current) { continue }
             best = screen
@@ -499,7 +536,6 @@ final class IslandPanelController {
     private func checkHover(force: Bool = false) {
         guard hoverTimer != nil, isVisible, panel.isVisible, !menuIsTracking,
               !state.isAdjustingPosition, !panel.headerDrag.isPressed else { return }
-        updateMousePassthrough()
         // The animation canvas also contains transparent space, which is not
         // part of the island. Only the visible shape and its destination count.
         let region = presentation.geometry.visibleFrame.union(desiredFrame)
@@ -579,6 +615,7 @@ final class IslandPanelController {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             presentation.geometry = presentationGeometry(visible: visible, canvas: canvas)
+            updateHeaderInteraction(visible: visible)
             if panel.frame != canvas { panel.setFrame(canvas, display: false) }
             // Commit the host layout together with any canvas resize. Do not
             // display an intermediate frame with the old content coordinates.
@@ -589,7 +626,6 @@ final class IslandPanelController {
             CATransaction.commit()
         }
         if frameTransition == nil { panel.headerDrag.refreshCursor() }
-        updateMousePassthrough()
     }
 
     private func presentationGeometry(visible: NSRect, canvas: NSRect) -> IslandPresentationGeometry {
@@ -599,16 +635,15 @@ final class IslandPanelController {
                                           topClearance: gap <= pixel ? 0 : gap)
     }
 
-    private func updateMousePassthrough() {
-        guard frameTransition != nil, !state.isAdjustingPosition else {
-            panel.ignoresMouseEvents = false
-            return
-        }
-        guard !menuIsTracking else { return }
-        let frame = presentation.geometry.visibleFrame
-        let pointer = NSEvent.mouseLocation
-        panel.ignoresMouseEvents = !(pointer.x >= frame.minX && pointer.x <= frame.maxX
-            && pointer.y >= frame.minY && pointer.y <= frame.maxY)
+    private func updateHeaderInteraction(visible: NSRect) {
+        let height = min(state.headerHeight, visible.height)
+        let header = state.isAdjustingPosition ? NSRect.zero : NSRect(
+            x: visible.minX, y: visible.maxY - height,
+            width: visible.width, height: height
+        )
+        // Publish hit geometry in the same update as the visible frame. Input
+        // never waits for a SwiftUI overlay to lay out or register its NSView.
+        panel.headerDrag.updateHeaderFrame(header, in: panel)
     }
 
     private func updateScreenGeometry() {
@@ -740,14 +775,21 @@ final class IslandPanelController {
                 self?.updateFrame(animated: false)
             }
         })
-        for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.screensDidWakeNotification] {
+        // Switching applications/Spaces changes Window Server ordering, not
+        // display geometry. Do not reset an in-flight reveal or drag here.
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
             workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    self?.panel.headerDrag.cancel()
-                    self?.screenEnvironmentChanged()
-                }
+                Task { @MainActor in self?.maintainWindowOrdering() }
             })
         }
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.panel.headerDrag.cancel()
+                self?.screenEnvironmentChanged()
+            }
+        })
         workspaceObservers.append(center.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -777,7 +819,7 @@ final class IslandPanelController {
         }
         updateScreenGeometry()
         updateFrame(animated: false)
-        if isVisible { panel.orderFrontRegardless() }
+        maintainWindowOrdering()
         checkHover()
     }
 
