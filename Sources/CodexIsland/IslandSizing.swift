@@ -13,6 +13,7 @@ enum IslandSizePreference: Int, CaseIterable {
 }
 
 enum IslandSizing {
+    static let detailHeight: CGFloat = 410
     /// Input is the desktop's logical size in points, not the panel's physical
     /// pixel resolution. AppKit already accounts for Retina backing scale.
     static func scale(for screenSize: CGSize, preference: IslandSizePreference = .automatic,
@@ -30,9 +31,9 @@ enum IslandSizing {
         let notchHeight = notchSize.height.isFinite ? max(0, notchSize.height) : 0
         // Fit the expanded layout as a whole rather than clipping enlarged text.
         // The physical camera gap does not scale with the surrounding controls.
-        let fit = min(screenSize.width / 420, screenSize.height / 336,
+        let fit = min(screenSize.width / 420, screenSize.height / (36 + detailHeight),
                       max(0, screenSize.width - notchWidth) / 152,
-                      max(0, screenSize.height - notchHeight) / 300)
+                      max(0, screenSize.height - notchHeight) / detailHeight)
         return max(0.1, min(requested, fit))
     }
 }

@@ -6,7 +6,7 @@ import SwiftUI
 
 @MainActor
 final class IslandState: ObservableObject {
-    private static let baseDetailHeight: CGFloat = 300
+    private static let baseDetailHeight = IslandSizing.detailHeight
 
     @Published var isExpanded = false
     @Published var isPinned = false
@@ -167,7 +167,7 @@ final class IslandPanelController {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
 
-    init(store: QuotaStore, initiallyExpanded: Bool) {
+    init(store: QuotaStore, activity: TaskActivityStore, initiallyExpanded: Bool) {
         self.store = store
         state = IslandState()
         state.isExpanded = initiallyExpanded
@@ -202,7 +202,8 @@ final class IslandPanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
         presentation.geometry = presentationGeometry(visible: desiredFrame, canvas: desiredFrame)
-        let host = IslandHostingView(rootView: IslandView(store: store, state: state, presentation: presentation))
+        let host = IslandHostingView(rootView: IslandView(store: store, activity: activity,
+                                                        state: state, presentation: presentation))
         host.sizingOptions = []
         host.frame = NSRect(origin: .zero, size: desiredFrame.size)
         host.autoresizingMask = [.width, .height]

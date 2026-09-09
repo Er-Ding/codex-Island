@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 struct IslandView: View {
     @ObservedObject var store: QuotaStore
+    @ObservedObject var activity: TaskActivityStore
     @ObservedObject var state: IslandState
     @ObservedObject var presentation: IslandPresentation
     @State private var selectedBucketID: String?
@@ -74,8 +75,12 @@ struct IslandView: View {
         .transaction { $0.animation = nil }
         .preferredColorScheme(.dark)
         .onChange(of: state.isExpanded) { expanded in
-            if !expanded { bucketMenu.dismiss() }
-            guard expanded, !store.isRefreshing else { return }
+            guard expanded else {
+                bucketMenu.dismiss()
+                return
+            }
+            activity.refresh()
+            guard !store.isRefreshing else { return }
             if store.snapshot.map({ Date().timeIntervalSince($0.fetchedAt) > 5 }) ?? true {
                 store.refresh()
             }
@@ -83,7 +88,7 @@ struct IslandView: View {
         .onChange(of: state.uiScale) { _ in bucketMenu.dismiss() }
         .onDisappear { bucketMenu.dismiss() }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(state.isAdjustingPosition ? "调整灵动岛位置" : "Codex 额度")
+        .accessibilityLabel(state.isAdjustingPosition ? "调整灵动岛位置" : "Codex 额度与任务")
     }
 
     private var positionAdjustmentHeader: some View {
@@ -194,7 +199,8 @@ struct IslandView: View {
     }
 
     private var expandedContent: some View {
-        VStack(alignment: .leading, spacing: s(12)) {
+        // 410 base points including padding; keep this in sync with detailHeight.
+        VStack(alignment: .leading, spacing: s(8)) {
             HStack(spacing: s(10)) {
                 ZStack {
                     RoundedRectangle(cornerRadius: s(9))
@@ -222,7 +228,7 @@ struct IslandView: View {
                     .frame(width: s(86))
                     .background(Capsule().fill(Color.white.opacity(0.065)))
             }
-            .frame(width: contentWidth, alignment: .leading)
+            .frame(width: contentWidth, height: s(40), alignment: .leading)
 
             HStack(spacing: s(10)) {
                 quotaCard(primary, fallbackTitle: "当前周期")
@@ -232,17 +238,16 @@ struct IslandView: View {
             }
             .frame(width: contentWidth, alignment: .leading)
 
-            Rectangle()
-                .fill(Color.white.opacity(0.075))
-                .frame(height: s(1))
-
             HStack(alignment: .center, spacing: s(8)) {
                 statusText
-                    .frame(width: max(0, contentWidth - s(102)), alignment: .leading)
+                    .frame(width: max(0, contentWidth - s(69)), alignment: .leading)
 
                 HStack(spacing: s(5)) {
-                    Button { store.refresh() } label: {
-                        if store.isRefreshing {
+                    Button {
+                        store.refresh()
+                        activity.refresh()
+                    } label: {
+                        if store.isRefreshing || activity.isRefreshing {
                             ProgressView()
                                 .controlSize(state.uiScale >= 1.75 ? .regular : (state.uiScale >= 1.25 ? .small : .mini))
                                 .frame(width: s(28), height: s(28))
@@ -252,8 +257,8 @@ struct IslandView: View {
                         }
                     }
                     .disabled(store.isRefreshing)
-                    .help("立即刷新")
-                    .accessibilityLabel("立即刷新额度")
+                    .help("立即刷新额度与任务")
+                    .accessibilityLabel("立即刷新额度与任务")
 
                     Button { state.togglePinned() } label: {
                         Image(systemName: state.isPinned ? "pin.fill" : "pin")
@@ -267,27 +272,25 @@ struct IslandView: View {
                     }
                     .help(state.isPinned ? "取消固定" : "保持展开")
                     .accessibilityLabel(state.isPinned ? "取消固定" : "保持展开")
-
-                    Button {
-                        state.collapse()
-                    } label: {
-                        Image(systemName: "chevron.up")
-                            .frame(width: s(28), height: s(28))
-                    }
-                    .help("收起")
-                    .accessibilityLabel("收起额度面板")
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: s(12), weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.55))
-                .frame(width: s(94))
+                .frame(width: s(61))
             }
-            .frame(width: contentWidth, height: s(52), alignment: .topLeading)
+            .frame(width: contentWidth, height: s(34), alignment: .leading)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.075))
+                .frame(height: s(1))
+
+            TaskActivityView(activity: activity, uiScale: state.uiScale)
+                .frame(width: contentWidth, height: s(141), alignment: .topLeading)
         }
         .frame(width: contentWidth, alignment: .leading)
         .padding(.horizontal, s(18))
-        .padding(.top, s(16))
-        .padding(.bottom, s(18))
+        .padding(.top, s(12))
+        .padding(.bottom, s(10))
         .frame(width: state.expandedWidth, alignment: .leading)
     }
 
@@ -389,17 +392,17 @@ struct IslandView: View {
                 Text(statusTitle)
                     .font(.system(size: s(10), weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.50))
+                    .lineLimit(1)
+                    .help(statusTitle)
             }
 
             if let error = store.errorMessage {
                 Text(error)
                     .font(.system(size: s(9)))
                     .foregroundStyle(Color.orange.opacity(0.80))
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .help(error)
-            }
-
-            if let fetched = store.snapshot?.fetchedAt {
+            } else if let fetched = store.snapshot?.fetchedAt {
                 Text("上次更新 \(fetched.formatted(date: .omitted, time: .shortened))")
                     .font(.system(size: s(9)))
                     .foregroundStyle(Color.white.opacity(0.31))
@@ -409,6 +412,7 @@ struct IslandView: View {
                     .foregroundStyle(Color.white.opacity(0.31))
             }
         }
+        .lineLimit(1)
     }
 
     private var statusTitle: String {

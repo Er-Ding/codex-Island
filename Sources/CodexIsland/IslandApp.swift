@@ -45,6 +45,7 @@ enum CodexIslandApp {
 @MainActor
 final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var store: QuotaStore?
+    private var activity: TaskActivityStore?
     private var island: IslandPanelController?
     private var statusItem: NSStatusItem?
     private var visibilityItem: NSMenuItem?
@@ -58,9 +59,13 @@ final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let arguments = CommandLine.arguments
         let store = QuotaStore(isDemo: arguments.contains("--demo"))
         self.store = store
-        island = IslandPanelController(store: store, initiallyExpanded: arguments.contains("--expanded"))
+        let activity = TaskActivityStore(isDemo: store.isDemo)
+        self.activity = activity
+        island = IslandPanelController(store: store, activity: activity,
+                                       initiallyExpanded: arguments.contains("--expanded"))
         installStatusItem(isDemo: store.isDemo)
         store.start()
+        activity.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -72,6 +77,7 @@ final class IslandAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         store?.stop()
+        activity?.stop()
         island?.close()
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
         statusItem = nil
