@@ -19,6 +19,8 @@ final class TaskActivityClient: @unchecked Sendable {
     private var protocolMismatch = false
     private var sourcesSeen = false
     private var names: [String: String] = ["local": "本机"]
+    private var clientTypes: [String: String] = [:]
+    private var sshAliases: [String: String] = [:]
     private var remoteHosts = Set<String>()
     private var confirmedHosts = Set<String>()
     private var candidates: [ThreadKey: String] = [:]
@@ -46,6 +48,7 @@ final class TaskActivityClient: @unchecked Sendable {
         var revision: Int
         var state: [String: Any]
         var bytes: Int
+        var sideTabTitle: String?
     }
 
     init() {
@@ -81,6 +84,27 @@ final class TaskActivityClient: @unchecked Sendable {
         queue.async {
             // Closing the client makes the router remove all its subscriptions.
             self.disconnect()
+        }
+    }
+
+    /// An island that subscribed before the first side-chat turn can miss its
+    /// initial input in a nested patch. Request a fresh snapshot on click so
+    /// navigation need not retain user input in every cached turn.
+    func refreshSideChatNavigation(_ context: TaskNavigationContext) async -> TaskNavigationContext? {
+        guard !Task.isCancelled else { return nil }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let key = ThreadKey(host: context.hostID, thread: context.threadID)
+                guard self.clientID != nil, self.streams[key] != nil else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.subscribe(key, refresh: true, priority: true)
+                self.queue.asyncAfter(deadline: .now() + 0.8) {
+                    let navigation = self.streams[key].map { self.navigationContext(for: key, state: $0.state) }
+                    continuation.resume(returning: navigation)
+                }
+            }
         }
     }
 
@@ -243,12 +267,20 @@ final class TaskActivityClient: @unchecked Sendable {
               let method = message["method"] as? String else { return }
         if let targets = message["targetClientIds"] as? [String],
            let clientID, !targets.contains(clientID) { return }
-        if method == "client-status-changed", params["status"] as? String == "disconnected",
-           let owner = params["clientId"] as? String {
-            for key in Array(streams.keys) where streams[key]?.owner == owner {
-                streams.removeValue(forKey: key)
-                markUnknown(key, detail: "任务来源已断开，等待重新同步")
-                if !streams.keys.contains(where: { $0.host == key.host }) { confirmedHosts.remove(key.host) }
+        if method == "client-status-changed", let owner = params["clientId"] as? String {
+            if params["status"] as? String == "connected",
+               let clientType = Self.nonempty(params["clientType"] as? String) {
+                clientTypes[owner] = clientType
+                for key in Array(streams.keys) where streams[key]?.owner == owner {
+                    updateNavigation(for: key)
+                }
+            } else if params["status"] as? String == "disconnected" {
+                clientTypes.removeValue(forKey: owner)
+                for key in Array(streams.keys) where streams[key]?.owner == owner {
+                    streams.removeValue(forKey: key)
+                    markUnknown(key, detail: "任务来源已断开，等待重新同步")
+                    if !streams.keys.contains(where: { $0.host == key.host }) { confirmedHosts.remove(key.host) }
+                }
             }
             return
         }
@@ -312,8 +344,14 @@ final class TaskActivityClient: @unchecked Sendable {
         if change["type"] as? String == "snapshot",
            let state = change["conversationState"] as? [String: Any] {
             if let current = streams[key], current.owner == owner, current.revision > revision { return }
+            // Side-chat tabs use the first prompt's plain-text label, not the
+            // generated conversation title. Project it before discarding input.
+            let previousTitle = streams[key].flatMap { $0.owner == owner ? $0.sideTabTitle : nil }
+            let sideTabTitle = previousTitle ?? TaskSideChatTitle.from(state)
             let summary = Self.summaryState(state)
-            streams[key] = ThreadStream(owner: owner, revision: revision, state: summary, bytes: Self.byteCount(summary))
+            streams[key] = ThreadStream(owner: owner, revision: revision, state: summary,
+                                        bytes: Self.byteCount(summary) + (sideTabTitle?.utf8.count ?? 0),
+                                        sideTabTitle: sideTabTitle)
         } else if change["type"] as? String == "patches" {
             guard var stream = streams[key], stream.owner == owner,
                   change["baseRevision"] as? Int == stream.revision,
@@ -326,9 +364,10 @@ final class TaskActivityClient: @unchecked Sendable {
                 var value: Any = stream.state
                 for patch in patches where Self.needsPatch(patch) { value = try Self.apply(patch, to: value) }
                 guard let state = value as? [String: Any] else { throw StreamError.invalidPatch }
+                if stream.sideTabTitle == nil { stream.sideTabTitle = TaskSideChatTitle.from(state) }
                 stream.state = Self.summaryState(state)
                 stream.revision = revision
-                stream.bytes = Self.byteCount(stream.state)
+                stream.bytes = Self.byteCount(stream.state) + (stream.sideTabTitle?.utf8.count ?? 0)
                 streams[key] = stream
             } catch {
                 markUnknown(key, detail: "正在重新同步任务进展")
@@ -343,21 +382,46 @@ final class TaskActivityClient: @unchecked Sendable {
     }
 
     private func projectActivity(_ state: [String: Any], key: ThreadKey) {
+        updateNavigation(for: key)
         let runtime = state["threadRuntimeStatus"] as? [String: Any]
         if ["needs_resume", "resuming"].contains(state["resumeState"] as? String ?? "")
             || runtime?["type"] as? String == "notLoaded" {
             markUnknown(key, detail: "任务来源待同步，请检查 Desktop 中的设备连接")
             return
         }
-        if let activity = TaskActivityDecoder.task(from: state, id: key.id,
+        if var activity = TaskActivityDecoder.task(from: state, id: key.id,
                                                    deviceName: names[key.host] ?? "远端设备",
                                                    fallbackTitle: candidates[key]) {
+            activity.navigation = navigationContext(for: key, state: state)
             activities[key] = activity
         } else if TaskActivityDecoder.hasConfirmedEnd(state) {
             activities.removeValue(forKey: key)
         } else {
             markUnknown(key, detail: "正在等待任务来源确认状态")
         }
+    }
+
+    private func navigationContext(for key: ThreadKey, state: [String: Any]) -> TaskNavigationContext {
+        let ownerType = streams[key].flatMap { clientTypes[$0.owner] }
+        let parentPath = Self.nonempty(state["sideConversationParentNavigationPath"] as? String)
+        // Desktop and the VS Code extension can both report source == "vscode".
+        // Preserve the original metadata; application selection needs the owner
+        // client type or the rollout's originator, not a guess from this field.
+        return TaskNavigationContext(threadID: key.thread, hostID: key.host,
+                                     ownerClientType: ownerType,
+                                     source: Self.nonempty(state["source"] as? String),
+                                     cwd: Self.nonempty(state["cwd"] as? String),
+                                     rolloutPath: Self.nonempty(state["rolloutPath"] as? String),
+                                     sshAlias: key.host == "local" ? nil : sshAliases[key.host],
+                                     isSideConversation: state["sideConversation"] as? Bool == true || parentPath != nil,
+                                     parentNavigationPath: parentPath,
+                                     sideTabTitle: streams[key]?.sideTabTitle)
+    }
+
+    private func updateNavigation(for key: ThreadKey) {
+        guard var activity = activities[key], let state = streams[key]?.state else { return }
+        activity.navigation = navigationContext(for: key, state: state)
+        activities[key] = activity
     }
 
     private func markUnknown(_ key: ThreadKey, detail: String) {
@@ -380,6 +444,7 @@ final class TaskActivityClient: @unchecked Sendable {
         output.removeAll(keepingCapacity: false)
         subscriptions.removeAll()
         streams.removeAll()
+        clientTypes.removeAll()
         sourcesSeen = false
         confirmedHosts.removeAll()
         limitedCoverage = false
@@ -443,11 +508,15 @@ final class TaskActivityClient: @unchecked Sendable {
         if let size = try? global.resourceValues(forKeys: [.fileSizeKey]).fileSize,
            size < 16 * 1024 * 1024, let data = try? Data(contentsOf: global), let state = Self.jsonObject(data) {
             remoteHosts.removeAll()
+            sshAliases.removeAll()
             for remote in state["codex-managed-remote-connections"] as? [[String: Any]] ?? [] {
                 guard let host = remote["hostId"] as? String else { continue }
                 remoteHosts.insert(host)
                 names[host] = Self.clean(remote["displayName"] as? String)
                     ?? Self.clean(remote["alias"] as? String) ?? "远端设备"
+                if host != "local", let alias = Self.nonempty(remote["alias"] as? String) {
+                    sshAliases[host] = alias
+                }
             }
             let atoms = state["electron-persisted-atom-state"] as? [String: Any] ?? [:]
             let prefixes = ["remote-thread-summaries-v2:", "remote-thread-summaries:"]
@@ -462,6 +531,7 @@ final class TaskActivityClient: @unchecked Sendable {
             }
         }
         candidates = found
+        for key in Array(activities.keys) { updateNavigation(for: key) }
         for key in found.keys.sorted(by: { $0.id > $1.id }) { subscribe(key) }
     }
 
@@ -473,6 +543,11 @@ final class TaskActivityClient: @unchecked Sendable {
         guard let value else { return nil }
         let text = value.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
         return text.isEmpty ? nil : String(text.prefix(180))
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
     }
 
     private enum StreamError: Error { case invalidPatch }
@@ -506,6 +581,9 @@ final class TaskActivityClient: @unchecked Sendable {
     // particular, reasoning, tool arguments and command output are not cached.
     private static func summaryState(_ state: [String: Any]) -> [String: Any] {
         var result = state.filter { stateFields.contains($0.key) }
+        if let pagination = state["turnsPagination"] as? [String: Any] {
+            result["turnsPagination"] = pagination.filter { $0.key == "hasLoadedOldest" }
+        }
         if let turns = state["turns"] as? [[String: Any]] { result["turns"] = turns.map(summaryTurn) }
         if let requests = state["requests"] as? [[String: Any]] {
             result["requests"] = requests.map { $0.filter { $0.key == "method" } }
@@ -523,7 +601,7 @@ final class TaskActivityClient: @unchecked Sendable {
         return result
     }
 
-    private static let stateFields: Set<String> = ["title", "generatedTitle", "resumeState", "threadRuntimeStatus", "requests", "turns", "turnHistory"]
+    private static let stateFields: Set<String> = ["title", "generatedTitle", "resumeState", "threadRuntimeStatus", "requests", "turns", "turnHistory", "turnsPagination", "source", "cwd", "rolloutPath", "sideConversation", "sideConversationParentNavigationPath"]
     private static let turnFields: Set<String> = ["turnId", "status", "items"]
     private static let itemFields: Set<String> = ["type", "status", "phase", "text", "plan"]
 
@@ -544,6 +622,7 @@ final class TaskActivityClient: @unchecked Sendable {
     private static func needsPatch(_ patch: [String: Any]) -> Bool {
         guard let path = patch["path"] as? [Any], !path.isEmpty else { return true }
         guard let root = path.first as? String, stateFields.contains(root) else { return false }
+        if root == "turnsPagination", path.count > 1 { return path[1] as? String == "hasLoadedOldest" }
         var turnPath: ArraySlice<Any>?
         if root == "requests", path.count > 2 { return path[2] as? String == "method" }
         if root == "turns", path.count > 2 { turnPath = path.dropFirst(2) }

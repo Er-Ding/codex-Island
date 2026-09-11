@@ -28,6 +28,10 @@ struct IslandView: View {
     private var contentWidth: CGFloat { max(0, state.expandedWidth - s(36)) }
     private var titleWidth: CGFloat { max(0, contentWidth - s(139)) }
     private var cardWidth: CGFloat { secondary == nil ? contentWidth : max(0, (contentWidth - s(10)) / 2) }
+    private var headerCameraGap: CGFloat { state.notchWidth > 0 ? state.notchWidth : s(12) }
+    private var headerWingWidth: CGFloat {
+        max(0, (presentation.geometry.visibleFrame.width - s(10) - headerCameraGap) / 2)
+    }
 
     var body: some View {
         GeometryReader { _ in
@@ -148,15 +152,20 @@ struct IslandView: View {
                     .font(.system(size: s(10), weight: .medium))
                 }
             }
-            .frame(maxWidth: .infinity)
+            .frame(width: headerWingWidth)
 
             // No text or controls may enter the physical camera cutout.
-            Color.clear.frame(width: state.notchWidth > 0 ? state.notchWidth : s(12))
+            Color.clear.frame(width: headerCameraGap)
 
-            compactValue(secondary ?? primary, symbol: nil,
-                         label: (secondary ?? primary)?.periodTitle ?? "当前周期",
-                         showPeriod: secondary != nil)
-                .frame(maxWidth: .infinity)
+            HStack(spacing: s(6)) {
+                compactTaskBadge
+                compactValue(secondary ?? primary, symbol: nil,
+                             label: (secondary ?? primary)?.periodTitle ?? "当前周期",
+                             showPeriod: secondary != nil)
+            }
+            // Anchor the task target to the camera gap while the outer width
+            // animates. The controller uses this same 32-point leading region.
+            .frame(width: headerWingWidth, alignment: .leading)
         }
         .padding(.horizontal, s(5))
         .contentShape(Rectangle())
@@ -165,8 +174,72 @@ struct IslandView: View {
         .help(state.isExpanded
               ? "拖动顶部移动，双击恢复主屏顶部位置；单击\(state.isPinned ? "取消固定" : "固定面板")"
               : "点击固定额度面板，按住顶部直接拖动")
+        .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { state.togglePinned() }
+    }
+
+    private var compactTaskBadge: some View {
+        HStack(spacing: s(4)) {
+            if activity.openingTaskID != nil {
+                Image(systemName: "hourglass")
+                    .font(.system(size: s(8), weight: .medium))
+                    .foregroundStyle(compactTaskColor)
+            } else {
+                Circle()
+                    .fill(compactTaskColor)
+                    .frame(width: s(4), height: s(4))
+            }
+            Text(compactTaskCount)
+                .font(.system(size: s(10), weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(compactTaskColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(width: s(32), height: s(22))
+        .background(RoundedRectangle(cornerRadius: s(7)).fill(compactTaskColor.opacity(0.10)))
+        .frame(width: s(32), height: state.headerHeight)
+        .contentShape(Rectangle())
+        // HeaderDrag routes pointer clicks and immediate drags; this action is
+        // only for accessibility so SwiftUI does not compete for mouse-down.
+        .help(compactTaskHelp)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(compactTaskHelp)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            if let task = activity.featuredTask {
+                activity.openTask(task)
+            } else {
+                state.cancelPendingHover()
+                state.isExpanded = true
+            }
+        }
+    }
+
+    private var compactTaskCount: String {
+        if activity.activeCount > 0 {
+            return activity.activeCount > 99 ? "99+" : "\(activity.activeCount)"
+        }
+        let unconfirmed = !activity.isConnected || activity.tasks.contains { $0.status == .unknown }
+        return unconfirmed ? "—" : "0"
+    }
+
+    private var compactTaskColor: Color {
+        switch activity.featuredTask?.status {
+        case .running: return mint
+        case .waiting: return .orange
+        case .unknown, nil: return Color.white.opacity(0.48)
+        }
+    }
+
+    private var compactTaskHelp: String {
+        if let task = activity.featuredTask {
+            let action = activity.openingTaskID == task.id ? "正在打开任务…" : task.openActionTitle
+            let summary = compactTaskCount == "—" ? "任务状态待同步" : "\(activity.activeCount) 个进行中的任务"
+            return "\(summary)\n\(task.title) · \(task.deviceName) · \(task.status.title)\n\(action)"
+        }
+        return "\(activity.connectionText)\n展开查看任务"
     }
 
     private func compactValue(_ window: QuotaWindow?, symbol: String?, label: String, showPeriod: Bool = true) -> some View {

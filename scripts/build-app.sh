@@ -23,6 +23,7 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>点击终端任务时，选择该会话已经打开的终端页签。</string>
 </dict></plist>
 PLIST
 codesign --force --sign - "$app_dir"

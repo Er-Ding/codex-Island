@@ -1,10 +1,11 @@
 import SwiftUI
 
-/// A read-only view of tasks reported by the connected Codex sources.
+/// Shows reported task activity and opens its existing source conversation.
 @MainActor
 struct TaskActivityView: View {
     @ObservedObject var activity: TaskActivityStore
     var uiScale: CGFloat
+    @State private var hoveredTaskID: String?
 
     private let mint = Color(red: 0.46, green: 0.88, blue: 0.70)
     private func s(_ base: CGFloat) -> CGFloat { base * uiScale }
@@ -28,12 +29,12 @@ struct TaskActivityView: View {
             }
             .frame(height: s(18))
 
-            Text(activity.connectionText)
+            Text(connectionText)
                 .font(.system(size: s(10)))
-                .foregroundStyle(activity.isConnected ? Color.white.opacity(0.40) : Color.orange.opacity(0.80))
+                .foregroundStyle(connectionColor)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .help(activity.connectionText)
+                .help(connectionText)
                 .frame(height: s(14), alignment: .leading)
 
             Group {
@@ -55,6 +56,18 @@ struct TaskActivityView: View {
         .accessibilityElement(children: .contain)
     }
 
+    private var connectionText: String {
+        if let message = activity.navigationMessage { return message }
+        if activity.openingTaskID != nil { return "正在打开任务…" }
+        return activity.connectionText
+    }
+
+    private var connectionColor: Color {
+        if activity.openingTaskID != nil { return mint.opacity(0.80) }
+        if activity.navigationMessage != nil { return Color.orange.opacity(0.80) }
+        return activity.isConnected ? Color.white.opacity(0.40) : Color.orange.opacity(0.80)
+    }
+
     private var emptyState: some View {
         VStack(spacing: s(6)) {
             Image(systemName: activity.isConnected ? "tray" : "network")
@@ -74,58 +87,77 @@ struct TaskActivityView: View {
         let title = task.title.isEmpty ? "未命名任务" : task.title
         let device = task.deviceName.isEmpty ? "未知设备" : task.deviceName
         let detail = task.detail.isEmpty ? "暂无新的进展" : task.detail
+        let opening = activity.openingTaskID == task.id
+        let hovered = hoveredTaskID == task.id
 
-        return VStack(alignment: .leading, spacing: s(4)) {
-            HStack(spacing: s(6)) {
-                Circle()
-                    .fill(statusColor(task.status))
-                    .frame(width: s(5), height: s(5))
-                    .accessibilityHidden(true)
-                Text(title)
-                    .font(.system(size: s(12), weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.86))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(task.status.title)
-                    .font(.system(size: s(10), weight: .medium))
-                    .foregroundStyle(statusColor(task.status))
-                    .fixedSize()
-            }
-            .frame(height: s(18))
+        return Button {
+            activity.openTask(task)
+        } label: {
+            VStack(alignment: .leading, spacing: s(4)) {
+                HStack(spacing: s(6)) {
+                    Circle()
+                        .fill(statusColor(task.status))
+                        .frame(width: s(5), height: s(5))
+                        .accessibilityHidden(true)
+                    Text(title)
+                        .font(.system(size: s(12), weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.86))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(opening ? "正在打开…" : task.status.title)
+                        .font(.system(size: s(10), weight: .medium))
+                        .foregroundStyle(statusColor(task.status))
+                        .fixedSize()
+                    Image(systemName: opening ? "hourglass" : "arrow.up.forward")
+                        .font(.system(size: s(10), weight: .medium))
+                        .foregroundStyle(hovered || opening ? mint : Color.white.opacity(0.35))
+                        .frame(width: s(12))
+                        .accessibilityHidden(true)
+                }
+                .frame(height: s(18))
 
-            HStack(spacing: s(5)) {
-                Image(systemName: "desktopcomputer")
-                    .font(.system(size: s(9)))
-                    .foregroundStyle(Color.white.opacity(0.35))
-                    .accessibilityHidden(true)
-                Text(device)
-                    .font(.system(size: s(10), weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.54))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: s(96), alignment: .leading)
-                Text("·")
-                    .font(.system(size: s(10)))
-                    .foregroundStyle(Color.white.opacity(0.28))
-                    .accessibilityHidden(true)
-                Text(detail)
-                    .font(.system(size: s(10)))
-                    .foregroundStyle(Color.white.opacity(0.43))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: s(5)) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: s(9)))
+                        .foregroundStyle(Color.white.opacity(0.35))
+                        .accessibilityHidden(true)
+                    Text(device)
+                        .font(.system(size: s(10), weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.54))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: s(96), alignment: .leading)
+                    Text("·")
+                        .font(.system(size: s(10)))
+                        .foregroundStyle(Color.white.opacity(0.28))
+                        .accessibilityHidden(true)
+                    Text(detail)
+                        .font(.system(size: s(10)))
+                        .foregroundStyle(Color.white.opacity(0.43))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: s(16))
             }
-            .frame(height: s(16))
+            .padding(.horizontal, s(8))
+            .padding(.vertical, s(4))
+            .frame(maxWidth: .infinity)
+            .frame(height: s(46))
+            .background(RoundedRectangle(cornerRadius: s(8)).fill(Color.white.opacity(hovered ? 0.075 : 0.035)))
+            .contentShape(RoundedRectangle(cornerRadius: s(8)))
         }
-        .padding(.horizontal, s(8))
-        .padding(.vertical, s(4))
-        .frame(maxWidth: .infinity)
-        .frame(height: s(46))
-        .background(RoundedRectangle(cornerRadius: s(8)).fill(Color.white.opacity(0.035)))
-        .help("\(title)\n\(device) · \(task.status.title)\n\(detail)")
+        .buttonStyle(.plain)
+        .disabled(activity.openingTaskID != nil)
+        .onHover { hovering in
+            if hovering { hoveredTaskID = task.id }
+            else if hoveredTaskID == task.id { hoveredTaskID = nil }
+        }
+        .help("\(title)\n\(device) · \(task.status.title)\n\(detail)\n\(task.openActionTitle)")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(title)，\(device)，\(task.status.title)，\(detail)")
+        .accessibilityHint(opening ? "正在打开任务" : task.openActionTitle)
     }
 
     private func statusColor(_ status: TaskActivityStatus) -> Color {

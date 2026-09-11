@@ -8,6 +8,7 @@ final class IslandHeaderDrag {
     enum Completion {
         case drag
         case click
+        case taskClick
         case doubleClick
         case cancelled
     }
@@ -26,10 +27,12 @@ final class IslandHeaderDrag {
         let pointer: CGPoint
         let origin: CGPoint
         let pressedHeaderFrame: NSRect
+        let isTaskPress: Bool
     }
 
     private weak var headerWindow: NSWindow?
     private var headerFrame: NSRect = .zero
+    private var taskFrame: NSRect = .zero
     private weak var draggingWindow: NSWindow?
     private var anchor: DragAnchor?
     private var consumesMouseUp = false
@@ -40,9 +43,10 @@ final class IslandHeaderDrag {
 
     /// The controller supplies screen coordinates in the same transaction as
     /// drawing the header. A layout change never cancels an active press.
-    func updateHeaderFrame(_ frame: NSRect, in window: NSWindow) {
+    func updateHeaderFrame(_ frame: NSRect, taskFrame: NSRect = .zero, in window: NSWindow) {
         headerWindow = window
         headerFrame = frame
+        self.taskFrame = taskFrame.intersection(frame)
         if !isDragging { refreshCursor() }
     }
 
@@ -55,6 +59,12 @@ final class IslandHeaderDrag {
             .intersection(view.bounds)
         guard !region.isEmpty, !region.isNull else { return }
         view.addCursorRect(region, cursor: isDragging ? .closedHand : .openHand)
+        if !isDragging, !taskFrame.isEmpty, !taskFrame.isNull {
+            let taskRegion = view.convert(window.convertFromScreen(taskFrame), from: nil).intersection(region)
+            if !taskRegion.isEmpty, !taskRegion.isNull {
+                view.addCursorRect(taskRegion, cursor: .pointingHand)
+            }
+        }
     }
 
     /// Cancelled sequences still own their matching mouse-up, so it cannot
@@ -77,12 +87,14 @@ final class IslandHeaderDrag {
         case .leftMouseDown:
             if isPressed { cancel() }
             consumesMouseUp = false
-            let candidate = precedingHeaderClick && event.clickCount == 2
+            let previousClick = precedingHeaderClick
             precedingHeaderClick = false
             // Read the event's global point before settling the canvas. Its
             // locationInWindow belongs to the frame that received the event.
             guard let pointer = screenPoint(for: event),
                   headerContains(pointer, in: window) else { return false }
+            let isTaskPress = containsIncludingEdges(taskFrame, pointer)
+            let candidate = !isTaskPress && previousClick && event.clickCount == 2
 
             // Own the sequence before the callback can expand or lay out the
             // island. The controller can now suspend hover on this same down.
@@ -93,7 +105,8 @@ final class IslandHeaderDrag {
             anchor = DragAnchor(
                 pointer: pointer,
                 origin: window.frame.origin,
-                pressedHeaderFrame: pressedHeaderFrame
+                pressedHeaderFrame: pressedHeaderFrame,
+                isTaskPress: isTaskPress
             )
             isDragging = false
             doubleClickCandidate = candidate
@@ -121,7 +134,8 @@ final class IslandHeaderDrag {
             anchor = DragAnchor(
                 pointer: pointer,
                 origin: window.frame.origin,
-                pressedHeaderFrame: pressedHeaderFrame
+                pressedHeaderFrame: pressedHeaderFrame,
+                isTaskPress: isTaskPress
             )
             refreshCursor()
             return true
@@ -155,7 +169,7 @@ final class IslandHeaderDrag {
                         || containsIncludingEdges(anchor.pressedHeaderFrame, pointer) {
                 // Expanding near a screen edge can move the header. Layout
                 // must not cancel an accepted click whose pointer stayed still.
-                completion = doubleClickCandidate ? .doubleClick : .click
+                completion = anchor.isTaskPress ? .taskClick : (doubleClickCandidate ? .doubleClick : .click)
             } else {
                 completion = .cancelled
             }
@@ -199,7 +213,7 @@ final class IslandHeaderDrag {
         let canGrab = canDrag?() == true
             && headerContains(NSEvent.mouseLocation, in: window)
         if canGrab {
-            setCursor(.openHand)
+            setCursor(containsIncludingEdges(taskFrame, NSEvent.mouseLocation) ? .pointingHand : .openHand)
         } else {
             releaseCursor()
         }

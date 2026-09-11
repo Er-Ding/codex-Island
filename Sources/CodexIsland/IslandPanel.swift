@@ -17,7 +17,7 @@ final class IslandState: ObservableObject {
     @Published var notchHeight: CGFloat = 32
     @Published var uiScale: CGFloat = 1
 
-    var compactWidth: CGFloat { isAdjustingPosition ? 300 * uiScale : (notchWidth > 0 ? notchWidth + 152 * uiScale : 224 * uiScale) }
+    var compactWidth: CGFloat { isAdjustingPosition ? 300 * uiScale : (notchWidth > 0 ? notchWidth + 232 * uiScale : 272 * uiScale) }
     var headerHeight: CGFloat { max(36 * uiScale, notchHeight) }
     var expandedWidth: CGFloat { max(420 * uiScale, compactWidth) }
     var detailHeight: CGFloat { Self.baseDetailHeight * uiScale }
@@ -137,6 +137,8 @@ final class IslandPanelController {
     let state: IslandState
     private let presentation = IslandPresentation()
     private let store: QuotaStore
+    private let activity: TaskActivityStore
+    private var headerPressedTask: TaskActivity?
     private(set) var panel: IslandPanel!
     private(set) var isVisible = true
     private var centerX: CGFloat = 0
@@ -169,6 +171,7 @@ final class IslandPanelController {
 
     init(store: QuotaStore, activity: TaskActivityStore, initiallyExpanded: Bool) {
         self.store = store
+        self.activity = activity
         state = IslandState()
         state.isExpanded = initiallyExpanded
         state.isPinned = initiallyExpanded
@@ -311,6 +314,9 @@ final class IslandPanelController {
 
     private func beginHeaderPress() -> Bool {
         guard canBeginHeaderPress else { return false }
+        // Freeze the target on mouse-down; a task update during the press must
+        // not change which conversation a stationary release opens.
+        headerPressedTask = activity.featuredTask
         headerPressOriginDisplayID = activeScreen.map(Self.screenID)
         stopHoverMonitoring()
         // A press can precede the hover delay or arrive during the reveal. Own
@@ -348,6 +354,11 @@ final class IslandPanelController {
             state.togglePinned()
             updateFrame(animated: false)
 
+        case .taskClick:
+            restoreHeaderPressPlacement()
+            if let task = headerPressedTask { activity.openTask(task) }
+            else { state.isExpanded = true }
+
         case .doubleClick:
             state.isHeaderDragging = false
             resetPosition()
@@ -357,6 +368,7 @@ final class IslandPanelController {
             restoreHeaderPressPlacement()
         }
         headerPressOriginDisplayID = nil
+        headerPressedTask = nil
         resumeHoverAfterHeaderPress()
     }
 
@@ -644,7 +656,12 @@ final class IslandPanelController {
         )
         // Publish hit geometry in the same update as the visible frame. Input
         // never waits for a SwiftUI overlay to lay out or register its NSView.
-        panel.headerDrag.updateHeaderFrame(header, in: panel)
+        let cameraGap = state.notchWidth > 0 ? state.notchWidth : 12 * state.uiScale
+        let taskFrame = state.isAdjustingPosition ? NSRect.zero : NSRect(
+            x: visible.midX + cameraGap / 2, y: header.minY,
+            width: 32 * state.uiScale, height: height
+        )
+        panel.headerDrag.updateHeaderFrame(header, taskFrame: taskFrame, in: panel)
     }
 
     private func updateScreenGeometry() {

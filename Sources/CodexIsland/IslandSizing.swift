@@ -32,7 +32,7 @@ enum IslandSizing {
         // Fit the expanded layout as a whole rather than clipping enlarged text.
         // The physical camera gap does not scale with the surrounding controls.
         let fit = min(screenSize.width / 420, screenSize.height / (36 + detailHeight),
-                      max(0, screenSize.width - notchWidth) / 152,
+                      max(0, screenSize.width - notchWidth) / 232,
                       max(0, screenSize.height - notchHeight) / detailHeight)
         return max(0.1, min(requested, fit))
     }
