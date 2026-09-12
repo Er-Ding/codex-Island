@@ -10,7 +10,7 @@ namespace CodexIsland.Windows;
 // Explicitly opted-in diagnostics only: the caller supplies a demo window and isolated settings.
 internal static class NativeDragSmoke
 {
-    private const uint LeftDown = 0x0002, LeftUp = 0x0004;
+    private const uint LeftDown = 0x0002, LeftUp = 0x0004, RightDown = 0x0008, RightUp = 0x0010;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint { public int X, Y; }
@@ -50,7 +50,10 @@ internal static class NativeDragSmoke
             StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Native input checks require the smoke directory's isolated settings file.");
         if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("Native input checks must run on the window's dispatcher.");
+        if (!window.Activity.IsDemo) throw new InvalidOperationException("Native input checks require demo tasks to prevent real navigation.");
         if (IsLeftDown) throw new InvalidOperationException("The left mouse button is already held; native input checks were not started.");
+        if ((GetAsyncKeyState(0x02) & 0x8000) != 0)
+            throw new InvalidOperationException("The right mouse button is already held; native input checks were not started.");
         if (Marshal.SizeOf<NativeInput>() != (IntPtr.Size == 8 ? 40 : 28))
             throw new InvalidOperationException("Unexpected Win32 INPUT layout.");
 
@@ -60,6 +63,7 @@ internal static class NativeDragSmoke
         var originalMenuState = window.Interaction.IsMenuOpen;
         var foreground = NativeMethods.GetForegroundWindow();
         var buttonHeldByTest = false;
+        var rightButtonHeldByTest = false;
         var checks = new List<string>();
         var header = (Button)window.FindName("HeaderButton");
 
@@ -73,7 +77,7 @@ internal static class NativeDragSmoke
             await Task.Delay(milliseconds);
             await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.Render);
         }
-        PointD HeaderPoint(double horizontalFraction = 0.5)
+        PointD HeaderPoint(double horizontalFraction = 0.25)
         {
             var point = header.PointToScreen(new Point(header.ActualWidth * horizontalFraction, header.ActualHeight / 2));
             return new(point.X, point.Y);
@@ -107,6 +111,24 @@ internal static class NativeDragSmoke
             MovePointer(new(work.CenterX, work.Bottom - 10));
             await Pump(80); // The real pointer exit clears manual-collapse suppression.
             Check(!window.Interaction.IsExpanded, "reset leaves the island compact before natural mouse entry");
+
+            var compactPoint = MovePointer(HeaderPoint());
+            Press(); // No dispatcher wait between entering the compact header and pressing.
+            await Pump(20);
+            Check(window.IsHeaderPressed && window.Interaction.IsExpanded && !window.Interaction.IsPinned,
+                "native pressing during compact entry captures the same sequence while expanding");
+            var compactOrigin = window.VisibleFrame;
+            MovePointer(new(compactPoint.X + 1, compactPoint.Y));
+            await Pump(30);
+            Check(window.IsHeaderDragging && Math.Abs(window.VisibleFrame.X - compactOrigin.X - 1) < .5,
+                "the first native pixel after compact entry moves the panel without another press");
+            Release();
+            await Pump(30);
+            Check(!window.IsHeaderPressed && settings.Load().Position is { IsValid: true },
+                "native release saves a drag that began during compact entry");
+            window.ResetPosition();
+            MovePointer(new(work.CenterX, work.Bottom - 10));
+            await Pump(80);
 
             MovePointer(HeaderPoint());
             await Pump(240);
@@ -177,6 +199,28 @@ internal static class NativeDragSmoke
             Check(Near(window.VisibleFrame, settled), "the native drag position survives an environment restore");
             window.SavePreview(Path.Combine(output, "native-drag-expanded.png"));
 
+            await SeparateClickSequence();
+            var beforeCancel = window.VisibleFrame;
+            var settingsBeforeCancel = File.ReadAllText(settings.FilePath);
+            var cancelPoint = MovePointer(HeaderPoint());
+            Press();
+            await Pump(20);
+            MovePointer(new(cancelPoint.X + direction * 15, cancelPoint.Y + 20));
+            await Pump(30);
+            Check(window.IsHeaderDragging, "native cancellation case starts with a captured moving panel");
+            rightButtonHeldByTest = true;
+            SendMouse(RightDown);
+            await Pump(30);
+            Check(!window.IsHeaderPressed && !window.IsHeaderDragging && !header.IsMouseCaptured
+                && Near(window.VisibleFrame, beforeCancel) && File.ReadAllText(settings.FilePath) == settingsBeforeCancel,
+                "native right mouse press cancels a held drag and restores settings without saving the draft");
+            SendMouse(RightUp);
+            rightButtonHeldByTest = false;
+            Release();
+            await Pump(30);
+            Check(!window.Interaction.IsPinned && File.ReadAllText(settings.FilePath) == settingsBeforeCancel,
+                "releasing the cancelled native press does not pin, navigate or save");
+
             // Use a non-default size to catch resets that accidentally discard display preferences.
             window.SetSize(IslandSize.Percent125);
             await CheckDoubleClickReset(initiallyPinned: false);
@@ -212,7 +256,7 @@ internal static class NativeDragSmoke
                     $"the {(initiallyPinned ? "pinned" : "unpinned")} double-click case starts expanded at a saved moved position");
                 var before = window.VisibleFrame;
                 var doubleClickPoint = MovePointer(HeaderPoint(0.1));
-                Check(Math.Abs(doubleClickPoint.X - before.CenterX) > 112 * window.UiScale * window.Display.DpiScale,
+                Check(Math.Abs(doubleClickPoint.X - before.CenterX) > IslandWindow.CompactWidth / 2 * window.UiScale * window.Display.DpiScale,
                     $"the {(initiallyPinned ? "pinned" : "unpinned")} double click targets the expanded header outside compact bounds");
                 Press();
                 await Pump(20);
@@ -230,8 +274,8 @@ internal static class NativeDragSmoke
                 var primary = IslandPlacement.Select(NativeMethods.Displays(), null);
                 var factor = IslandPlacement.Scale(primary,
                     savedBefore.DisplaySizes.GetValueOrDefault(primary.Id, IslandSize.Automatic)) * primary.DpiScale;
-                var expected = IslandPlacement.Clamp(new(primary.WorkArea.CenterX - 112 * factor,
-                    primary.WorkArea.Y, 224 * factor, 36 * factor), primary.WorkArea);
+                var expected = IslandPlacement.Clamp(new(primary.WorkArea.CenterX - IslandWindow.CompactWidth / 2 * factor,
+                    primary.WorkArea.Y, IslandWindow.CompactWidth * factor, 36 * factor), primary.WorkArea);
                 Check(!window.Interaction.IsExpanded && !window.Interaction.IsPinned && !window.IsHeaderPressed
                     && !window.IsHeaderDragging && !header.IsMouseCaptured && restored.Position is null
                     && window.Display.Id == primary.Id && Near(window.VisibleFrame, expected),
@@ -246,7 +290,8 @@ internal static class NativeDragSmoke
         {
             try
             {
-                if (buttonHeldByTest) SendMouse(LeftUp);
+                try { if (rightButtonHeldByTest) SendMouse(RightUp); }
+                finally { if (buttonHeldByTest) SendMouse(LeftUp); }
             }
             finally
             {

@@ -6,7 +6,7 @@
 
 ```text
 windows/
-├── CodexIsland.Core/       # 额度、交互、位置和设置逻辑
+├── CodexIsland.Core/       # 额度、任务流、交互、位置和设置逻辑
 ├── CodexIsland.Windows/    # 桌面窗口和托盘
 ├── CodexIsland.Checks/     # 核心与进程通信检查
 ├── CodexIsland.slnx
@@ -55,38 +55,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/test-windows
 ```powershell
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 .\CodexIsland.exe --check-quota | Out-String
+.\CodexIsland.exe --check-tasks | Out-String
 .\CodexIsland.exe --diagnose-screen | Out-String
 .\CodexIsland.exe --demo --expanded
 ```
 
-`--check-quota` 只输出额度类别、周期、剩余比例和时间；`--diagnose-screen` 输出屏幕几何与 DPI。`--demo` 使用明确标注的演示数据。`--smoke-test <输出目录>` 运行隔离的界面检查后退出，不改用户设置。
+`--check-quota` 只输出额度类别、周期、剩余比例和时间；`--check-tasks` 只输出 Desktop 连接状态、任务数量与状态统计，不输出任务标题、提问或会话内容；`--diagnose-screen` 输出屏幕几何与 DPI。`--demo` 使用明确标注的额度和任务演示数据，不执行真实会话导航。`--smoke-test <输出目录>` 运行隔离的界面检查后退出，不改用户设置。
 
 应用可通过托盘、`--codex-path` 或 `CODEX_ISLAND_CODEX_PATH` 指定原生 `codex.exe`。继承的 `CODEX_HOME` 会传给 Codex 子进程。本工具不启动 WSL、不复制认证文件；数据来自该 Windows 进程实际登录的账号。
 
 ## 平台分支
 
-- `Windows` 分支只维护 `windows/`；`macOS` 分支只维护 `macos/`。
+- `Windows` 分支维护 `windows/`。当前 macOS 新功能在远端 `main` 的 `Sources/CodexIsland/`。
 - 根目录保留使用入口、许可和 Git 公共配置；平台文档、脚本和产物放在平台目录内。
-- `main` 暂保留原有历史基线。本次整理不修改默认分支，不重写历史。
+- 本地 `macOS` 分支的 `macos/` 是早期隔离快照；截至 2026-09-12，远端没有同名分支。本次不切换分支、不重写历史。
 - 平台功能从对应分支创建功能分支，完成后合回同一平台。不要将两个平台分支直接互相合并；需要共享修复时，选择相关提交并在目标平台验证。
 
-当前仓库已有本地平台分支时，使用 `git switch Windows` / `git switch macOS`。在远程已经发布相应分支、但新克隆尚无本地分支时：
+获取 Windows 分支：
 
 ```bash
 git fetch origin
 git switch --track origin/Windows
-# macOS 开发机使用：git switch --track origin/macOS
 ```
 
-需要同时开发两端时，推荐独立工作目录。例如当前已在 Windows 分支，可在 macOS 分支存在且未被其他工作区检出的情况下运行：
+需要对照最新 macOS 源码时，可使用独立工作目录，基于刷新后的 `origin/main` 创建本地开发分支：
 
 ```bash
-git worktree add ../codex-island-macos macOS
+git worktree add -b macos-latest ../codex-island-macos origin/main
 ```
 
 新建本地分支不会自动在 GitHub 发布，需另行推送。平台切换时，Git 不会清除 `.build/`、`dist/` 等被忽略的本地产物。
 
 ## 验证范围
+
+2026-09-12 的 Windows 0.4.1 修复启动前任务漏计，已通过 99 项核心／任务管道检查和 75 项界面／导航保护检查。新增回归覆盖无会话索引的既有任务、远端和后台子任务、首次订阅无回应、断线重连、1300 个历史候选的公平轮换，以及冷却期间实时通知。实机顺序冷启动诊断中，旧版发现 2 个运行任务，新版发现 3 个；验证过程中没有重新开始 Codex 任务。
+
+2026-09-12 的 Windows 0.4.0 本地构建已通过 85 项核心／任务管道检查、75 项界面／导航保护检查及 34 项真实鼠标输入检查，编译无警告或错误。本机 Desktop 的真实任务流连接和真实额度读取通过。导航检查覆盖无效目标、跨设备歧义、预取消、元数据边界和页签精确匹配；未逐一点击真实会话验收各来源跳转。完整范围与限制见 [更新日志](../../CHANGELOG.md)。
 
 历史版本 0.3.1 在 Windows 11 x64 单屏环境通过 40 项核心检查和 23 项界面检查，并验证真实额度读取。界面检查包括即时展开、额度切换、菜单关闭、150% 大小、位置保存、单实例相关窗口行为和正常退出。
 

@@ -36,6 +36,14 @@ public sealed class IslandInteraction
         return false;
     }
 
+    public void Expand()
+    {
+        if (IsAdjusting) return;
+        pending = null;
+        lastInside = null;
+        suppressUntilExit = false;
+        IsExpanded = true;
+    }
     public void ToggleHeader()
     {
         if (IsAdjusting) return;

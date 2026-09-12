@@ -14,6 +14,7 @@ namespace CodexIsland.Windows;
 
 public partial class IslandWindow : Window
 {
+    internal const double CompactWidth = 280, ExpandedHeight = 486;
     private readonly QuotaStore store;
     private readonly SettingsStore settingsStore;
     private readonly bool enablePolling;
@@ -46,14 +47,22 @@ public partial class IslandWindow : Window
     public event Action? ExitRequested;
     public event Action? CodexPathChanged;
 
-    public IslandWindow(QuotaStore store, SettingsStore settingsStore, bool initiallyExpanded = false, bool enablePolling = true)
+    public IslandWindow(QuotaStore store, SettingsStore settingsStore, bool initiallyExpanded = false, bool enablePolling = true,
+        TaskActivityStore? activity = null)
     {
         this.store = store;
         this.settingsStore = settingsStore;
         this.enablePolling = enablePolling;
+        ownsActivity = activity is null;
+        this.activity = activity ?? new TaskActivityStore(new TaskActivityClient(), isDemo: store.IsDemo);
         Settings = settingsStore.Load();
         display = IslandPlacement.Select(NativeMethods.Displays(), Settings.Position?.DisplayId);
         InitializeComponent();
+        this.activity.Changed += ActivityChanged;
+        TaskBadge.Invoked = () =>
+        {
+            if (this.activity.FeaturedTask is { } task) _ = OpenTaskAsync(task); else OpenTaskList();
+        };
         // React on the input event; polling is only a fallback and handles leaving the island.
         MouseEnter += PointerEntered;
         MouseLeave += PointerLeft;
@@ -73,6 +82,8 @@ public partial class IslandWindow : Window
             Dispatcher.BeginInvoke(() => ExitRequested?.Invoke());
         };
         store.Changed += StoreChanged;
+        if (ownsActivity && enablePolling) this.activity.Start();
+        UpdateTasks();
         UpdateDisplay();
     }
 
@@ -116,7 +127,7 @@ public partial class IslandWindow : Window
         {
             CancelHeaderPress();
             RefreshEnvironment();
-            if (enablePolling) await store.RefreshAsync();
+            if (enablePolling) await RefreshAllAsync();
         });
     }
 
@@ -130,7 +141,7 @@ public partial class IslandWindow : Window
         bucketMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);
         if (!interaction.IsAdjusting)
         {
-            var size = new SizeD(224 * uiScale * display.DpiScale, 36 * uiScale * display.DpiScale);
+            var size = new SizeD(CompactWidth * uiScale * display.DpiScale, 36 * uiScale * display.DpiScale);
             var compact = Settings.Position?.Restore(display, size)
                 ?? IslandPlacement.Clamp(new(display.WorkArea.CenterX - size.Width / 2, display.WorkArea.Y, size.Width, size.Height), display.WorkArea);
             centerX = compact.CenterX;
@@ -145,8 +156,8 @@ public partial class IslandWindow : Window
         get
         {
             var factor = uiScale * display.DpiScale;
-            var width = (interaction.IsAdjusting ? 300 : interaction.IsExpanded ? 420 : 224) * factor;
-            var height = (interaction.IsExpanded ? 336 : 36) * factor;
+            var width = (interaction.IsAdjusting ? 300 : interaction.IsExpanded ? 420 : CompactWidth) * factor;
+            var height = (interaction.IsExpanded ? ExpandedHeight : 36) * factor;
             return IslandPlacement.Clamp(new(centerX - width / 2, topY, width, height), display.WorkArea);
         }
     }
@@ -162,11 +173,13 @@ public partial class IslandWindow : Window
         {
             wasExpanded = interaction.IsExpanded;
             if (!wasExpanded) bucketMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);
+            if (wasExpanded && enablePolling) _ = activity.RefreshAsync();
             if (wasExpanded && enablePolling && (store.Snapshot is null || DateTimeOffset.UtcNow - store.Snapshot.FetchedAt > TimeSpan.FromSeconds(5)))
                 _ = store.RefreshAsync();
         }
         if (hwnd == 0) return;
         var target = DesiredFrame;
+        LayoutRoot.Height = Math.Max(36, Math.Min(ExpandedHeight, display.WorkArea.Height / (uiScale * display.DpiScale)));
         if (animated && animating && target == targetFrame) return;
         targetFrame = target;
         var start = visibleFrame.IsUsable ? visibleFrame : target;
@@ -214,7 +227,7 @@ public partial class IslandWindow : Window
         var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var width = frame.Width / dpi;
         var height = frame.Height / dpi;
-        var expansion = Math.Clamp((height / uiScale - 36) / 300, 0, 1);
+        var expansion = Math.Clamp((height / uiScale - 36) / Math.Max(1, LayoutRoot.Height - 36), 0, 1);
         var reveal = Math.Clamp(expansion / 0.75, 0, 1);
         Canvas.SetLeft(IslandSurface, (frame.X - canvasFrame.X) / dpi);
         Canvas.SetTop(IslandSurface, (frame.Y - canvasFrame.Y) / dpi);
@@ -354,6 +367,7 @@ public partial class IslandWindow : Window
     {
         CancelHeaderPress();
         if (!interaction.IsVisible) { ShowIsland(); return; }
+        taskNavigationCancellation?.Cancel();
         if (interaction.IsAdjusting) CancelAdjustment();
         interaction.SetVisible(false);
         hoverTimer.Stop();
@@ -482,7 +496,7 @@ public partial class IslandWindow : Window
     private void CollapseClicked(object sender, RoutedEventArgs e) { interaction.Collapse(); ApplyState(); }
     private void DoneClicked(object sender, RoutedEventArgs e) => FinishAdjustment();
     private void CancelClicked(object sender, RoutedEventArgs e) => CancelAdjustment();
-    private async void RefreshClicked(object sender, RoutedEventArgs e) => await store.RefreshAsync();
+    private async void RefreshClicked(object sender, RoutedEventArgs e) => await RefreshAllAsync();
     private void BucketClicked(object sender, RoutedEventArgs e)
     {
         if (store.Snapshot is not { Buckets.Count: > 1 } snapshot) return;
@@ -544,6 +558,7 @@ public partial class IslandWindow : Window
         if (allowClose) return;
         CancelHeaderPress();
         allowClose = true;
+        StopTaskInteraction();
         StopAnimation();
         hoverTimer.Stop(); pollTimer.Stop(); labelTimer.Stop();
         bucketMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);

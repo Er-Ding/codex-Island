@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -12,39 +13,95 @@ public partial class IslandWindow
     private readonly DispatcherTimer headerInputTimer;
     private PointD headerPressPointer;
     private RectD headerPressFrame;
+    private RectD headerOriginalHitFrame;
     private bool headerFinishing;
     private bool previousHeaderClick, headerDoubleClick;
+    private bool headerTaskPress, headerCancellationEventsAttached;
+    private TaskActivity? headerPressedTask;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
 
     internal bool IsHeaderDragging => headerGesture.IsDragging;
     internal bool IsHeaderPressed => headerGesture.IsPressed;
 
     private void HeaderPressed(object sender, MouseButtonEventArgs e)
     {
-        if (BeginHeaderPress(NativeMethods.Pointer, e.ClickCount)) e.Handled = true;
+        var pointer = NativeMethods.Pointer;
+        // Freeze the target before expansion or a live task refresh changes the badge.
+        var taskPress = TaskBadge.IsVisible && ScreenFrame(TaskBadge).Contains(pointer);
+        var pressedTask = taskPress ? activity.FeaturedTask : null;
+        if (!BeginHeaderPress(pointer, e.ClickCount)) return;
+        headerTaskPress = taskPress;
+        headerPressedTask = pressedTask;
+        if (taskPress) headerDoubleClick = false;
+        e.Handled = true;
     }
 
     internal bool BeginHeaderPress(PointD pointer, int clickCount = 1)
     {
-        if (!interaction.IsExpanded || interaction.IsAdjusting || interaction.IsMenuOpen || dragging
+        if (!interaction.IsVisible || interaction.IsAdjusting || interaction.IsMenuOpen || dragging
             || headerGesture.IsPressed || !double.IsFinite(pointer.X) || !double.IsFinite(pointer.Y)) return false;
 
-        // Settle an in-flight hover animation before recording a stable physical-pixel anchor.
-        ApplyState(false);
+        if (!headerCancellationEventsAttached)
+        {
+            HeaderButton.AddHandler(PreviewMouseDownEvent, new MouseButtonEventHandler(HeaderOtherButtonPressed), true);
+            HeaderButton.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(HeaderKeyPressed), true);
+            headerCancellationEventsAttached = true;
+        }
         var doubleClick = clickCount == 2 && previousHeaderClick;
         previousHeaderClick = false;
+        headerTaskPress = false;
+        headerPressedTask = null;
+        headerOriginalHitFrame = ScreenFrame(HeaderButton);
         if (!HeaderButton.CaptureMouse()) return false;
         headerDoubleClick = doubleClick;
         headerPressPointer = pointer;
-        headerPressFrame = visibleFrame;
+        // Own this same press before expansion can change layout or dispatch hover events.
         headerGesture.Press(pointer);
+        interaction.Expand();
+        ApplyState(false);
+        HeaderButton.UpdateLayout();
+        headerPressFrame = visibleFrame;
         interaction.ResetPointerTracking();
         headerInputTimer.Start();
+        return true;
+    }
+
+    private static RectD ScreenFrame(FrameworkElement element)
+    {
+        var topLeft = element.PointToScreen(new(0, 0));
+        var bottomRight = element.PointToScreen(new(element.ActualWidth, element.ActualHeight));
+        return new(topLeft.X, topLeft.Y, bottomRight.X - topLeft.X, bottomRight.Y - topLeft.Y);
+    }
+
+    private void HeaderOtherButtonPressed(object sender, MouseButtonEventArgs e)
+    {
+        if (headerGesture.IsPressed && e.ChangedButton != MouseButton.Left) CancelHeaderPress();
+    }
+
+    private void HeaderKeyPressed(object sender, KeyEventArgs e)
+    {
+        if (!headerGesture.IsPressed || e.Key != Key.Escape) return;
+        CancelHeaderPress();
+        e.Handled = true;
+    }
+
+    private bool CancelHeaderFromInput()
+    {
+        // A non-activating island cannot depend on receiving keyboard focus. Read key state
+        // only while its own press is captured; no global hook or focus change is necessary.
+        if ((GetAsyncKeyState(0x1B) & 0x8000) == 0 && (GetAsyncKeyState(0x02) & 0x8000) == 0
+            && (GetAsyncKeyState(0x04) & 0x8000) == 0 && (GetAsyncKeyState(0x05) & 0x8000) == 0
+            && (GetAsyncKeyState(0x06) & 0x8000) == 0) return false;
+        CancelHeaderPress();
         return true;
     }
 
     private void HeaderPointerMoved(object sender, MouseEventArgs e)
     {
         if (!headerGesture.IsPressed || headerFinishing) return;
+        if (CancelHeaderFromInput()) { e.Handled = true; return; }
         if (e.LeftButton != MouseButtonState.Pressed) EndHeaderPress(NativeMethods.Pointer);
         else MoveHeaderPress(NativeMethods.Pointer);
         e.Handled = true;
@@ -53,6 +110,7 @@ public partial class IslandWindow
     private void TrackHeaderPress()
     {
         if (!headerGesture.IsPressed || headerFinishing) return;
+        if (CancelHeaderFromInput()) return;
         if (!HeaderButton.IsMouseCaptured)
         {
             CancelHeaderPress();
@@ -73,7 +131,7 @@ public partial class IslandWindow
         {
             dragging = true;
             headerDoubleClick = false;
-            HeaderButton.Cursor = Cursors.SizeAll;
+            HeaderButton.Cursor = Cursors.ScrollAll;
             IslandSurface.BorderBrush = Brush("#508F74");
         }
         if (!headerGesture.IsDragging) return;
@@ -94,6 +152,7 @@ public partial class IslandWindow
     private void HeaderReleased(object sender, MouseButtonEventArgs e)
     {
         if (!headerGesture.IsPressed) return;
+        if (CancelHeaderFromInput()) { e.Handled = true; return; }
         EndHeaderPress(NativeMethods.Pointer);
         e.Handled = true; // A completed drag must never bubble into Button.Click.
     }
@@ -112,8 +171,13 @@ public partial class IslandWindow
         MoveHeaderPress(pointer);
         var release = headerGesture.Release(pointer);
         var doubleClick = headerDoubleClick;
+        var taskPress = headerTaskPress;
+        var pressedTask = headerPressedTask;
         var localPointer = HeaderButton.PointFromScreen(new(pointer.X, pointer.Y));
-        var clickedHeader = new Rect(0, 0, HeaderButton.ActualWidth, HeaderButton.ActualHeight).Contains(localPointer);
+        var clickedHeader = new Rect(0, 0, HeaderButton.ActualWidth, HeaderButton.ActualHeight).Contains(localPointer)
+            || headerOriginalHitFrame.Contains(pointer);
+        headerTaskPress = false;
+        headerPressedTask = null;
         ReleaseHeaderCapture();
         if (release == HeaderRelease.Drag)
         {
@@ -131,7 +195,12 @@ public partial class IslandWindow
             RefreshEnvironment();
             if (release == HeaderRelease.Click && clickedHeader)
             {
-                if (doubleClick) ResetPosition();
+                if (taskPress)
+                {
+                    if (pressedTask is not null) _ = OpenTaskAsync(pressedTask);
+                    else OpenTaskList();
+                }
+                else if (doubleClick) ResetPosition();
                 else
                 {
                     // Keep the header in place after the first click, including when unpinning,
@@ -153,6 +222,8 @@ public partial class IslandWindow
     internal void CancelHeaderPress()
     {
         previousHeaderClick = headerDoubleClick = false;
+        headerTaskPress = false;
+        headerPressedTask = null;
         if (!headerGesture.IsPressed) return;
         headerGesture.Cancel();
         ReleaseHeaderCapture();

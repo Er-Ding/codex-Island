@@ -32,6 +32,7 @@ internal static class SmokeChecks
             await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.Render);
         }
         // Freeze physical pointer polling so the user's mouse cannot change fixtures.
+        await TaskNavigationChecks.RunAsync(Check, output);
         window.Interaction.SetMenuOpen(true);
         window.ResetPosition();
         await Settle();
@@ -53,6 +54,21 @@ internal static class SmokeChecks
         Check(window.Interaction.IsExpanded && window.Interaction.IsPinned, "header automation invokes expand and pin");
         Check(!window.IsAnimating && window.VisibleFrame.Height > 300 * window.Display.DpiScale, "expansion animation completes");
         Check(NativeMethods.GetForegroundWindow() != window.Handle, "expanding preserves foreground focus");
+        Check(window.Activity.IsDemo, "task diagnostics use explicit demo data before any navigation action");
+        var taskRows = ((ItemsControl)window.FindName("TaskRows")).Items.Cast<TaskRowViewModel>().ToArray();
+        Check(taskRows.Length == 3 && taskRows.Count(r => r.Task.Status != TaskActivityStatus.Unknown) == 2
+            && taskRows.Count(r => r.Task.Status == TaskActivityStatus.Unknown) == 1,
+            "task list renders active and unconfirmed demo tasks separately");
+        Check(((TextBlock)window.FindName("TaskBadgeCount")).Text == "2"
+            && taskRows.All(row => !string.IsNullOrWhiteSpace(row.Title) && !string.IsNullOrWhiteSpace(row.DeviceName)
+                && !string.IsNullOrWhiteSpace(row.Detail)),
+            "compact task badge counts only active tasks and each row shows title, device and progress");
+        var badgePeer = UIElementAutomationPeer.CreatePeerForElement((UIElement)window.FindName("TaskBadge"))!;
+        ((IInvokeProvider)badgePeer.GetPattern(PatternInterface.Invoke)!).Invoke();
+        await Settle();
+        Check(!window.IsOpeningTask && ((TextBlock)window.FindName("TaskConnection")).Text == "演示任务不会打开实际会话",
+            "task badge exposes an accessible invoke action without navigating out of demo mode");
+        Check(NativeMethods.GetForegroundWindow() != window.Handle, "demo task invocation preserves foreground focus");
         window.SavePreview(Path.Combine(output, "expanded.png"));
         Invoke("BucketButton"); await Settle();
         var menu = window.BucketMenu!;
@@ -117,9 +133,31 @@ internal static class SmokeChecks
         PointD TopPoint()
         {
             var button = (Button)window.FindName("HeaderButton");
-            var point = button.PointToScreen(new Point(button.ActualWidth / 2, button.ActualHeight / 2));
+            var point = button.PointToScreen(new Point(button.ActualWidth / 4, button.ActualHeight / 2));
             return new(point.X, point.Y);
         }
+        var compactPress = TopPoint();
+        Check(!window.Interaction.IsExpanded && window.BeginHeaderPress(compactPress)
+            && window.Interaction.IsExpanded && !window.Interaction.IsPinned,
+            "a compact header press captures and expands in the same input call without pinning");
+        var compactDragOrigin = window.VisibleFrame;
+        window.MoveHeaderPress(new(compactPress.X + 1, compactPress.Y));
+        Check(window.IsHeaderDragging && Math.Abs(window.VisibleFrame.X - compactDragOrigin.X - 1) < .1,
+            "the same compact press follows its first physical pixel without releasing and pressing again");
+        window.CancelHeaderPress();
+        Check(settings.Load().Position is null && !window.IsHeaderPressed,
+            "cancelling a compact-origin drag leaves the saved position unchanged");
+        window.ResetPosition();
+        window.Interaction.Expand();
+        window.ApplyState();
+        var animatedPress = TopPoint();
+        Check(window.BeginHeaderPress(animatedPress) && !window.IsAnimating && window.Interaction.IsExpanded,
+            "a header press settles an in-progress expansion before recording its drag anchor");
+        var animatedDragOrigin = window.VisibleFrame;
+        window.MoveHeaderPress(new(animatedPress.X, animatedPress.Y + 1));
+        Check(window.IsHeaderDragging && Math.Abs(window.VisibleFrame.Y - animatedDragOrigin.Y - 1) < .1,
+            "a press accepted during expansion follows the same pointer without a jump");
+        window.CancelHeaderPress();
         Expand();
         var pressOrigin = window.VisibleFrame;
         var pressPoint = TopPoint();
@@ -158,6 +196,24 @@ internal static class SmokeChecks
         ((Button)window.FindName("HeaderButton")).ReleaseMouseCapture();
         Check(!window.IsHeaderPressed && window.VisibleFrame == droppedFrame && settings.Load().Position == droppedSettings,
             "capture loss cancels the draft and restores the saved position");
+        var headerForCancellation = (Button)window.FindName("HeaderButton");
+        foreach (var escape in new[] { true, false })
+        {
+            var settingsBeforeCancel = File.ReadAllText(settings.FilePath);
+            var cancelPoint = TopPoint();
+            window.BeginHeaderPress(cancelPoint);
+            window.MoveHeaderPress(new(cancelPoint.X - 40, cancelPoint.Y + 35));
+            if (escape)
+                headerForCancellation.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice,
+                    PresentationSource.FromVisual(window)!, Environment.TickCount, Key.Escape)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            else
+                headerForCancellation.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Right)
+                    { RoutedEvent = Mouse.PreviewMouseDownEvent });
+            Check(!window.IsHeaderPressed && !window.IsHeaderDragging && !headerForCancellation.IsMouseCaptured
+                && window.VisibleFrame == droppedFrame && File.ReadAllText(settings.FilePath) == settingsBeforeCancel,
+                $"{(escape ? "Escape" : "right mouse button")} cancels a held drag and restores the anchor without rewriting settings");
+        }
         nextPoint = TopPoint();
         window.BeginHeaderPress(nextPoint);
         window.EndHeaderPress(new(nextPoint.X + 30, nextPoint.Y));

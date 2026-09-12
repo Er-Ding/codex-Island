@@ -21,11 +21,21 @@ public sealed record QuotaWindow(
 
     public string ResetText(DateTimeOffset now)
     {
-        if (ResetsAt is not { } reset) return "恢复时间暂未提供";
+        if (ResetsAt is not { } reset || !double.IsFinite(reset)) return "恢复时间暂未提供";
         var seconds = reset - now.ToUnixTimeSeconds();
         if (seconds <= 0) return "已到恢复时间，等待刷新";
         // Keep untrusted, implausibly large timestamps out of integer conversions.
         if (seconds > TimeSpan.FromDays(3650).TotalSeconds) return "恢复时间暂未提供";
+        if (WindowDurationMins == 10080)
+        {
+            try
+            {
+                // Fixed UTC+8 and invariant Gregorian formatting, independent of Windows locale/time zone.
+                var beijing = DateTimeOffset.FromUnixTimeSeconds((long)Math.Floor(reset)).ToOffset(TimeSpan.FromHours(8));
+                return "北京时间 " + beijing.ToString("M月d日 HH:mm", CultureInfo.InvariantCulture) + " 刷新";
+            }
+            catch (ArgumentOutOfRangeException) { return "恢复时间暂未提供"; }
+        }
         var minutes = Math.Max(1, (long)Math.Ceiling(seconds / 60));
         return minutes switch
         {

@@ -26,7 +26,7 @@ flowchart LR
 
 现有项目依赖 SwiftUI、AppKit、CoreGraphics 和 Darwin，界面与 macOS 窗口代码不能直接编译到 Windows。这个工具的核心需求是一个小型透明、置顶、不抢焦点的原生窗口。WPF 能直接承担这些职责，Win32 补充窗口风格、物理屏幕坐标和显示器 DPI，WinForms 仅用于系统托盘。项目不依赖额外 NuGet 包。
 
-macOS 的 Swift 源码和构建脚本在 `macOS` 分支的 `macos/` 目录中维护；Windows 在 `Windows` 分支的 `windows/` 目录中维护。业务规则采用等价的 C# 实现，通过测试保持一致，当前不建立 Swift/C# 跨语言运行时共享。未来若统一两个平台，应先共享协议样本与行为测试，再决定是否重构桌面框架。
+Windows 在 `Windows` 分支的 `windows/` 目录中维护。当前最新 macOS 来源是远端 `main` 的 `Sources/CodexIsland/`，本地 `macOS` 分支仍为早期隔离目录快照。业务规则采用等价的 C# 实现，通过测试保持一致，当前不建立 Swift/C# 跨语言运行时共享。
 
 ## 模块对应
 
@@ -42,6 +42,9 @@ macOS 的 Swift 源码和构建脚本在 `macOS` 分支的 `macos/` 目录中维
 | `IslandView.swift`、`IslandBucketMenu.swift` | `Windows/IslandWindow.xaml` | 胶囊、额度卡片、菜单和按钮 |
 | `IslandApp.swift` | `Windows/Program.cs`、`TrayIcon.cs` | 入口、单实例、通知区域菜单、退出清理 |
 | 各 Swift checks | `Checks/Program.cs`、`Windows/SmokeChecks.cs` | 无测试框架依赖的逻辑、进程与 WPF 检查 |
+| `TaskActivityClient.swift`、`TaskActivityDecoder.swift` | `Core/TaskActivityClient.cs`、`TaskActivityDecoder.cs`、`TaskActivityProjection.cs` | Windows 命名管道、快照与增量、状态确认、任务摘要最小化 |
+| `TaskActivityStore.swift`、`TaskActivityView.swift` | `Core/TaskActivityStore.cs`、`Windows/IslandWindow.Tasks.cs` | 独立轮询、断线保留、任务徽标与列表 |
+| `TaskNavigator.swift` 及各来源导航 | `Windows/Task*Navigator.cs` | Desktop 链接、VS Code 活窗口定位、终端原会话与侧边聊天 UIA |
 
 表内 Windows 路径以 `windows/CodexIsland.` 开头的项目目录为基准。
 
@@ -55,6 +58,17 @@ macOS 的 Swift 源码和构建脚本在 `macOS` 分支的 `macos/` 目录中维
 6. **持久化**：设置按用户保存在 LocalAppData，采用临时文件替换。顶部拖动保存失败时恢复上次保存的位置并显示提示；托盘调整模式保存失败时保留草稿。损坏设置采用默认位置；外接屏暂时不存在时不覆盖原屏幕 ID。
 7. **菜单与排版**：额度菜单使用自定义 WPF 模板，统一深色圆角、选中状态与字体。弹窗单独应用显示大小，打开时暂停自动收起，选择后释放保护。标题、数值与辅助文字采用统一层级，参考 [Geist](https://vercel.com/geist/typography) 和 [Fluent](https://fluent2.microsoft.design/typography)。
 8. **顶部移动与复位**：展开后在顶部额度栏按住左键，首次物理坐标变化就开始拖动，没有长按时间或位移门槛。拖动期间暂停悬停收起，使用物理像素保持按压锚点；松开时按落点显示器重新计算大小、限制到工作区并保存。捕获丢失时取消草稿，恢复已保存位置。原地单击切换固定状态并保持展开，避免双击首击缩小第二击的命中区域；依据系统 ClickCount 识别第二击，未移动时松开复位到主屏顶部并收起，保留各屏幕大小设置。第二击发生移动时优先拖动；拖动后的点击不会误作复位。面板中的位置按钮已移除，托盘仍提供原有调整模式。
+
+## 0.4.0 任务同步与 Windows 导航
+
+- **接口**：核对本机 Desktop `26.908.4834.0`，连接已有 `codex-ipc` 命名管道；LE32 长度帧、初始化与订阅消息、任务流 version 11。后台每 3 秒更新任务视图，约 15 秒重查已加载候选；不启动任务、不建立远端连接。
+- **启动补齐（0.4.1）**：发现来源包含会话索引、writer locks、Desktop client-id／tab-routes 缓存、项目归属及无项目会话。client-id 键中的 `local:` 是 UI scope，不能作为本机执行证据；结合明确的设备信息，并对已知设备上的未知归属会话请求现有 owner 快照。后台子任务从已知路由字段发现，不将终端 session ID 当成任务。
+- **补订阅**：未收到快照时从 3 秒开始重试，逐步延长至 30 秒；重扫缓存保留从实时事件发现的任务，重连重新订阅。任务流快照也可补发现漏收初始通知的任务。最多并行订阅 256 项，非活动历史候选按探测时间轮换，真实 owner 通知可立即越过历史候选冷却；全局状态文件最多 16 MiB，其中候选探测最多 8192 项，超过限制显示部分待同步。
+- **状态**：以确认的 runtime／turn 状态决定运行、等待或结束；断线、版本不兼容和 revision 缺口不视作完成，保留任务并提示。计划步骤优先，其次显示公开进展摘要及工具类型状态。
+- **数据边界**：任务缓存只保留标题、状态、进度及导航所需字段，不持久化完整提问、原始推理、命令、工具参数或输出。侧边聊天仅保留首问投影后的页签名称。帧、缓存和订阅数有上限，覆盖不完整时明确显示。
+- **界面**：缩略宽度 280 DIP、展开 420 × 486 DIP；额度卡片下增加任务列表，使用同套字体和深色滚动条。大比例在较小工作区中可滚动查看；徽标按下时冻结目标，移动优先拖动，双击额度区域复位。
+- **导航**：Desktop 使用其已有会话链接；VS Code 依据实时进程、窗口 ID 与当前来源日志定位并重验；终端只接受可确认的进程／窗口／页签关联。原入口不明确时回退 Desktop，并给出原因。侧边聊天依据严格主会话路径和唯一页签名称，使用 Windows UI Automation 选择已有页签，焦点变化或取消后停止动作。
+- **生命周期**：同步与导航使用独立取消控制，异步读取不阻塞 WPF；隐藏取消正在进行的定位，退出清理任务订阅及本应用拥有的诊断辅助进程。
 
 ## 验证与交付
 

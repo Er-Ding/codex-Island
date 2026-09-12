@@ -1,7 +1,8 @@
 <Window x:Class="CodexIsland.Windows.IslandWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Codex Island" Width="224" Height="36" WindowStyle="None"
+        xmlns:local="clr-namespace:CodexIsland.Windows"
+        Title="Codex Island" Width="280" Height="36" WindowStyle="None"
         AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True" Focusable="False"
         FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="14" Language="zh-CN" Foreground="#F0F2F4"
@@ -9,6 +10,44 @@
         UseLayoutRounding="True" SnapsToDevicePixels="True">
     <Window.Resources>
         <SolidColorBrush x:Key="Mint" Color="#75E0B3" />
+        <Style TargetType="ScrollBar">
+            <Setter Property="Width" Value="7" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True"
+                               Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                               ViewportSize="{TemplateBinding ViewportSize}"
+                               Value="{Binding Value, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                                    <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb>
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border x:Name="ScrollGrip" Background="#35433F" CornerRadius="3" Margin="1,2" MinHeight="20" />
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ScrollGrip" Property="Background" Value="#638074" /></Trigger>
+                                                <Trigger Property="IsDragging" Value="True"><Setter TargetName="ScrollGrip" Property="Background" Value="#75E0B3" /></Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                                    <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                        </Track>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <FontFamily x:Key="InterfaceFont">Segoe UI, Microsoft YaHei UI</FontFamily>
         <Style x:Key="Caption" TargetType="TextBlock">
             <Setter Property="FontSize" Value="12" />
@@ -134,22 +173,46 @@
                 </Grid>
             </Border>
         </DataTemplate>
+        <DataTemplate x:Key="TaskRow">
+            <Button Click="TaskClicked" HorizontalContentAlignment="Stretch" Padding="9,7" Margin="0,0,0,5"
+                    Background="#12181B" ToolTip="{Binding HelpText}" AutomationProperties.Name="{Binding HelpText}">
+                <Grid Width="336">
+                    <Grid.RowDefinitions><RowDefinition Height="20" /><RowDefinition Height="18" /></Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /><ColumnDefinition Width="78" /></Grid.ColumnDefinitions>
+                    <Ellipse Width="5" Height="5" Fill="{Binding Accent}" HorizontalAlignment="Left" />
+                    <TextBlock Grid.Column="1" Text="{Binding Title}" FontSize="13" FontWeight="SemiBold" Foreground="#E3EBEF" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="2" Text="{Binding StatusText}" Foreground="{Binding Accent}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                    <DockPanel Grid.Row="1" Grid.ColumnSpan="3" Margin="12,0,0,0">
+                        <TextBlock Text="{Binding DeviceName}" FontSize="11" Foreground="#98A3AA" MaxWidth="90" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                        <TextBlock Text=" · " FontSize="11" Foreground="#65727C" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding Detail}" FontSize="11" Foreground="#86929A" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    </DockPanel>
+                </Grid>
+            </Button>
+        </DataTemplate>
     </Window.Resources>
     <Canvas x:Name="HostCanvas">
         <Border x:Name="IslandSurface" Background="#080A0C" BorderBrush="#282D31" BorderThickness="1" CornerRadius="0,0,17,17">
-            <Grid x:Name="LayoutRoot" Height="336" Width="224" VerticalAlignment="Top" HorizontalAlignment="Center">
-                <Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="300" /></Grid.RowDefinitions>
+            <Grid x:Name="LayoutRoot" Height="486" Width="280" VerticalAlignment="Top" HorizontalAlignment="Center">
+                <Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                 <Button x:Name="HeaderButton" Click="HeaderClicked" ToolTip="按住拖动，松开保存；双击恢复默认位置；单击固定或取消固定"
-                        AutomationProperties.Name="固定或取消固定额度面板" AutomationProperties.HelpText="展开后按住顶部即可拖动，双击恢复默认位置"
+                        AutomationProperties.Name="固定或取消固定额度面板" AutomationProperties.HelpText="按住顶部即可拖动，双击额度区域恢复默认位置；任务徽标打开优先任务"
                         PreviewMouseLeftButtonDown="HeaderPressed" PreviewMouseMove="HeaderPointerMoved"
                         PreviewMouseLeftButtonUp="HeaderReleased" LostMouseCapture="HeaderCaptureLost">
                     <Grid x:Name="CompactHeader" Width="210">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="40" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <TextBlock Text="✦" Foreground="{StaticResource Mint}" FontSize="12" Margin="0,0,6,0" />
                             <TextBlock x:Name="FirstPeriod" Foreground="#9DA5AB" FontSize="11" VerticalAlignment="Center" />
                             <TextBlock x:Name="FirstPercent" FontSize="12" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular" Margin="5,0,0,0" />
                         </StackPanel>
+                        <local:TaskBadgeControl x:Name="TaskBadge" Grid.Column="1" Height="23" CornerRadius="7" Background="#172821"
+                                                Cursor="Hand" VerticalAlignment="Center" AutomationProperties.Name="查看任务">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Ellipse x:Name="TaskBadgeDot" Width="4" Height="4" Fill="#98A3AA" Margin="0,0,5,0" />
+                                <TextBlock x:Name="TaskBadgeCount" Text="—" FontSize="11" FontWeight="SemiBold" Foreground="#98A3AA" Typography.NumeralAlignment="Tabular" />
+                            </StackPanel>
+                        </local:TaskBadgeControl>
                         <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <TextBlock x:Name="SecondPeriod" Foreground="#98A3AA" FontSize="11" VerticalAlignment="Center" />
                             <TextBlock x:Name="SecondPercent" FontSize="12" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular" Margin="6,0,0,0" />
@@ -169,11 +232,13 @@
                     <Button x:Name="DoneButton" Grid.Column="1" Height="24" Content="完成" Foreground="#75E0B3" Background="#1C3229" FontSize="11" Click="DoneClicked" AutomationProperties.Name="完成并保存位置" />
                     <Button x:Name="CancelButton" Grid.Column="2" Content="×" FontSize="16" Click="CancelClicked" ToolTip="取消位置调整" AutomationProperties.Name="取消位置调整" />
                 </Grid>
-                <Grid x:Name="Details" Grid.Row="1" Width="420" Height="300" HorizontalAlignment="Center" Margin="0" Opacity="0" IsHitTestVisible="False">
-                    <Grid Margin="18,14,18,12">
+                <ScrollViewer x:Name="Details" Grid.Row="1" Width="418" HorizontalAlignment="Center" Opacity="0" IsHitTestVisible="False"
+                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                    <Grid Margin="18,14,18,14" MinHeight="422">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="44" /><RowDefinition Height="10" /><RowDefinition Height="132" />
-                            <RowDefinition Height="10" /><RowDefinition Height="1" /><RowDefinition Height="10" /><RowDefinition Height="*" />
+                            <RowDefinition Height="10" /><RowDefinition Height="56" /><RowDefinition Height="10" />
+                            <RowDefinition Height="1" /><RowDefinition Height="10" /><RowDefinition Height="149" />
                         </Grid.RowDefinitions>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="43" /><ColumnDefinition Width="*" /><ColumnDefinition Width="82" /></Grid.ColumnDefinitions>
@@ -197,8 +262,8 @@
                         <ItemsControl x:Name="Cards" Grid.Row="2" ItemTemplate="{StaticResource QuotaCard}">
                             <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Rows="1" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                         </ItemsControl>
-                        <Border Grid.Row="4" Background="#24292D" />
-                        <Grid Grid.Row="6" VerticalAlignment="Center">
+                        <Border Grid.Row="6" Background="#24292D" />
+                        <Grid Grid.Row="4" VerticalAlignment="Center">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="92" /></Grid.ColumnDefinitions>
                             <StackPanel>
                                 <StackPanel Orientation="Horizontal">
@@ -210,13 +275,27 @@
                                 <TextBlock x:Name="LastUpdated" FontSize="11" LineHeight="16" LineStackingStrategy="BlockLineHeight" Foreground="#86929A" Margin="0,2,0,0" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;" Click="RefreshClicked" ToolTip="立即刷新" AutomationProperties.Name="立即刷新额度" />
+                                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;" Click="RefreshClicked" ToolTip="立即刷新额度与任务" AutomationProperties.Name="立即刷新额度与任务" />
                                 <Button x:Name="PinButton" Style="{StaticResource IconButton}" Content="&#xE718;" Click="PinClicked" ToolTip="固定面板" AutomationProperties.Name="固定面板" />
                                 <Button x:Name="CollapseButton" Style="{StaticResource IconButton}" Content="&#xE70E;" Click="CollapseClicked" ToolTip="收起" AutomationProperties.Name="收起额度面板" />
                             </StackPanel>
                         </Grid>
+                        <Grid Grid.Row="8">
+                            <Grid.RowDefinitions><RowDefinition Height="22" /><RowDefinition Height="21" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                            <DockPanel>
+                                <TextBlock Text="进行中的任务" FontSize="13" FontWeight="SemiBold" Foreground="#DCE4E7" />
+                                <TextBlock x:Name="TaskTotal" Text="0" FontSize="12" Foreground="#98A3AA" Margin="8,0,0,0" />
+                            </DockPanel>
+                            <TextBlock x:Name="TaskConnection" Grid.Row="1" FontSize="11" Foreground="#98A3AA" TextTrimming="CharacterEllipsis" />
+                            <Border x:Name="TaskEmpty" Grid.Row="2" Background="#101518" CornerRadius="9">
+                                <TextBlock x:Name="TaskEmptyText" Text="正在连接任务来源…" FontSize="12" Foreground="#86929A" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <ScrollViewer x:Name="TaskScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                                <ItemsControl x:Name="TaskRows" ItemTemplate="{StaticResource TaskRow}" />
+                            </ScrollViewer>
+                        </Grid>
                     </Grid>
-                </Grid>
+                </ScrollViewer>
             </Grid>
         </Border>
     </Canvas>

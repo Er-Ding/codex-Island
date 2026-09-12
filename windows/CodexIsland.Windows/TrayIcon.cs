@@ -17,7 +17,7 @@ internal sealed class TrayIcon : IDisposable
         menu.Items.Add(new Forms.ToolStripMenuItem(store.IsDemo ? "Codex Island · 演示" : "Codex Island") { Enabled = false });
         menu.Items.Add(new Forms.ToolStripSeparator());
         var visibility = Add("隐藏灵动岛", window.ToggleVisibility);
-        Add("刷新额度", () => _ = store.RefreshAsync());
+        Add("刷新额度与任务", () => _ = window.RefreshAllAsync());
         menu.Items.Add(new Forms.ToolStripSeparator());
         var sizes = new Forms.ToolStripMenuItem("显示大小");
         foreach (var size in Enum.GetValues<IslandSize>())
@@ -46,7 +46,7 @@ internal sealed class TrayIcon : IDisposable
         };
         menu.Closed += (_, _) => window.SetMenuOpen(false);
         image = CreateIcon();
-        icon = new Forms.NotifyIcon { Icon = image, Text = store.IsDemo ? "Codex Island · 演示数据" : "Codex Island · 查看额度", ContextMenuStrip = menu, Visible = true };
+        icon = new Forms.NotifyIcon { Icon = image, Text = store.IsDemo ? "Codex Island · 演示数据" : "Codex Island · 额度与任务", ContextMenuStrip = menu, Visible = true };
         icon.MouseClick += (_, e) => { if (e.Button == Forms.MouseButtons.Left) window.ToggleVisibility(); };
     }
 

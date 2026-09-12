@@ -4,12 +4,12 @@ using CodexIsland.Core;
 
 namespace CodexIsland.Windows;
 
-internal sealed record Options(bool Demo, bool Expanded, bool CheckQuota, bool DiagnoseScreen,
+internal sealed record Options(bool Demo, bool Expanded, bool CheckQuota, bool CheckTasks, bool DiagnoseScreen,
     string? CodexPath, string? SmokeDirectory, bool Help)
 {
     internal static Options Parse(string[] args)
     {
-        bool demo = false, expanded = false, check = false, diagnose = false, help = false;
+        bool demo = false, expanded = false, check = false, tasks = false, diagnose = false, help = false;
         string? path = null, smoke = null;
         for (var i = 0; i < args.Length; i++)
         {
@@ -18,6 +18,7 @@ internal sealed record Options(bool Demo, bool Expanded, bool CheckQuota, bool D
                 case "--demo": demo = true; break;
                 case "--expanded": expanded = true; break;
                 case "--check-quota": check = true; break;
+                case "--check-tasks": tasks = true; break;
                 case "--diagnose-screen": diagnose = true; break;
                 case "--help" or "-h": help = true; break;
                 case "--codex-path" when i + 1 < args.Length: path = args[++i]; break;
@@ -25,7 +26,7 @@ internal sealed record Options(bool Demo, bool Expanded, bool CheckQuota, bool D
                 default: throw new ArgumentException("参数无效。使用 --help 查看可用参数。");
             }
         }
-        return new(demo, expanded, check, diagnose, path, smoke, help);
+        return new(demo, expanded, check, tasks, diagnose, path, smoke, help);
     }
 }
 
@@ -34,19 +35,21 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (TaskTerminalNavigator.TryRunConsoleProbe(args, out var probeExitCode)) return probeExitCode;
         Options? options = null;
         try
         {
             options = Options.Parse(args);
-            if (options.Help || options.CheckQuota || options.DiagnoseScreen || options.SmokeDirectory is not null)
+            if (options.Help || options.CheckQuota || options.CheckTasks || options.DiagnoseScreen || options.SmokeDirectory is not null)
                 Console.OutputEncoding = new System.Text.UTF8Encoding(false);
             NativeMethods.SetProcessDpiAwarenessContext(new nint(-4));
             if (options.Help)
             {
-                Console.WriteLine("CodexIsland [--demo] [--expanded] [--codex-path PATH]\n  --check-quota       Read real account quotas and exit\n  --diagnose-screen   Print screen geometry and exit\n  --smoke-test DIR    Run isolated demo UI checks and save previews");
+                Console.WriteLine("CodexIsland [--demo] [--expanded] [--codex-path PATH]\n  --check-quota       Read real account quotas and exit\n  --check-tasks       Check Desktop task connection and counts (no task contents)\n  --diagnose-screen   Print screen geometry and exit\n  --smoke-test DIR    Run isolated demo UI checks and save previews");
                 return 0;
             }
             if (options.CheckQuota) return CheckQuotaAsync(options).GetAwaiter().GetResult();
+            if (options.CheckTasks) return CheckTasksAsync().GetAwaiter().GetResult();
             if (options.DiagnoseScreen)
             {
                 Console.WriteLine(JsonSerializer.Serialize(NativeMethods.Displays().Select((d, i) => new
@@ -79,6 +82,22 @@ internal static class Program
         }
     }
 
+    private static async Task<int> CheckTasksAsync()
+    {
+        await using var activity = new TaskActivityClient();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        TaskActivitySnapshot? latest = null;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            latest = await activity.FetchAsync(timeout.Token);
+            if (latest.IsConnected && attempt >= 2) break;
+            await Task.Delay(1000, timeout.Token);
+        }
+        Console.WriteLine($"connected={latest!.IsConnected} tasks={latest.Tasks.Count} running={latest.Tasks.Count(t => t.Status == TaskActivityStatus.Running)} waiting={latest.Tasks.Count(t => t.Status == TaskActivityStatus.Waiting)} unknown={latest.Tasks.Count(t => t.Status == TaskActivityStatus.Unknown)}");
+        Console.WriteLine(latest.ConnectionText);
+        return latest.IsConnected ? 0 : 1;
+    }
+
     private static async Task<int> CheckQuotaAsync(Options options)
     {
         var settings = new SettingsStore().Load();
@@ -95,6 +114,7 @@ internal sealed class IslandApplication(Options options) : Application
 {
     private QuotaClient? client;
     private QuotaStore? store;
+    private TaskActivityStore? activity;
     private IslandWindow? island;
     private TrayIcon? tray;
     private bool stopping;
@@ -107,7 +127,8 @@ internal sealed class IslandApplication(Options options) : Application
         var sessionPath = options.CodexPath ?? settings.Load().CodexPath;
         client = new QuotaClient(() => CodexLocator.Find(sessionPath));
         store = new QuotaStore(client, options.Demo || options.SmokeDirectory is not null);
-        island = new IslandWindow(store, settings, options.Expanded, options.SmokeDirectory is null);
+        activity = new TaskActivityStore(new TaskActivityClient(), options.Demo || options.SmokeDirectory is not null);
+        island = new IslandWindow(store, settings, options.Expanded, options.SmokeDirectory is null, activity);
         MainWindow = island;
         client.QuotaChanged += island.QuotaNotification;
         island.ExitRequested += () => _ = ShutdownAsync();
@@ -128,6 +149,8 @@ internal sealed class IslandApplication(Options options) : Application
         };
         island.Show();
         tray = new TrayIcon(island, store, () => _ = ShutdownAsync());
+        if (options.SmokeDirectory is null) activity.Start();
+        else await activity.RefreshAsync();
         await store.RefreshAsync();
         if (options.SmokeDirectory is { } output)
         {
@@ -149,6 +172,7 @@ internal sealed class IslandApplication(Options options) : Application
         stopping = true;
         island?.CloseForExit();
         tray?.Dispose(); tray = null;
+        if (activity is not null) await activity.DisposeAsync();
         if (store is not null) await store.DisposeAsync();
         Shutdown(code);
     }
@@ -156,6 +180,7 @@ internal sealed class IslandApplication(Options options) : Application
     {
         // Also covers Windows logoff/session shutdown, which bypasses the tray.
         tray?.Dispose();
+        activity?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         client?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         base.OnExit(e);
     }

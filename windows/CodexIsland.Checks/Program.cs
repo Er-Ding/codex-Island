@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using CodexIsland.Core;
@@ -20,6 +21,15 @@ internal static class Program
         HeaderDragChecks();
         await StoreChecks();
         await TransportChecks();
+        try
+        {
+            foreach (var check in await TaskActivityChecks.RunAsync())
+            {
+                passed++;
+                Console.WriteLine("PASS: " + check);
+            }
+        }
+        catch (Exception error) { failed++; Console.Error.WriteLine("FAIL: " + error.Message); }
         Console.WriteLine($"{passed} passed, {failed} failed.");
         return failed == 0 ? 0 : 1;
     }
@@ -92,6 +102,32 @@ internal static class Program
         {
             var value = new QuotaWindow(88, 10080, Now.AddSeconds(-1).ToUnixTimeSeconds());
             Assert(value.ResetText(Now) == "已到恢复时间，等待刷新" && value.RemainingPercent == 12);
+        });
+        Check("weekly reset uses Beijing date across midnight with a fixed 24-hour clock", () =>
+        {
+            var now = new DateTimeOffset(2026, 9, 12, 12, 0, 0, TimeSpan.Zero);
+            var reset = new DateTimeOffset(2026, 9, 12, 20, 7, 0, TimeSpan.Zero);
+            var previousCulture = CultureInfo.CurrentCulture;
+            try
+            {
+                CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("ar-SA");
+                Assert(new QuotaWindow(60, 10080, reset.ToUnixTimeSeconds()).ResetText(now)
+                    == "北京时间 9月13日 04:07 刷新");
+            }
+            finally { CultureInfo.CurrentCulture = previousCulture; }
+        });
+        Check("non-weekly resets retain their relative countdown", () =>
+        {
+            Assert(new QuotaWindow(60, 300, Now.AddMinutes(61).ToUnixTimeSeconds()).ResetText(Now) == "1小时1分钟后恢复");
+            Assert(new QuotaWindow(60, 1440, Now.AddHours(25).ToUnixTimeSeconds()).ResetText(Now) == "1天1小时后恢复");
+        });
+        Check("weekly reset rejects missing, non-finite and implausible future timestamps", () =>
+        {
+            foreach (var reset in new double?[] { null, double.NaN, double.PositiveInfinity, double.NegativeInfinity,
+                Now.AddDays(3651).ToUnixTimeSeconds() })
+                Assert(new QuotaWindow(60, 10080, reset).ResetText(Now) == "恢复时间暂未提供");
+            Assert(new QuotaWindow(60, 10080, DateTimeOffset.MaxValue.ToUnixTimeSeconds())
+                .ResetText(DateTimeOffset.MaxValue.AddHours(-1)) == "恢复时间暂未提供");
         });
         Check("secondary-only quota is still displayed", () => Assert(Parse("""{"rateLimits":{"secondary":{"usedPercent":27}}}""").MainBucket.Windows.Single().RemainingPercent == 73));
         Check("error messages do not expose upstream account data", () =>
@@ -223,6 +259,29 @@ internal static class Program
             for (var i = 0; i < 20; i++) Assert(!state.ObservePointer(true, i));
             Assert(!state.ObservePointer(false, 21) && !state.IsExpanded);
             Assert(state.ObservePointer(true, 22) && state.IsExpanded);
+        });
+        Check("explicit expansion accepts a compact header press without pinning or hover reentry", () =>
+        {
+            var state = new IslandInteraction();
+            state.Collapse();
+            state.Expand();
+            Assert(state.IsExpanded && !state.IsPinned);
+            Assert(!state.ObservePointer(false, 0));
+            Assert(state.ObservePointer(false, .3) && !state.IsExpanded);
+        });
+        Check("explicit expansion clears pending departure and preserves pinning", () =>
+        {
+            var state = new IslandInteraction();
+            state.Expand();
+            state.ObservePointer(false, 1);
+            state.Expand();
+            Assert(!state.ObservePointer(false, 2) && state.IsExpanded);
+            state.TogglePin();
+            state.Expand();
+            Assert(state.IsPinned && state.IsExpanded);
+            state.BeginAdjustment();
+            state.Expand();
+            Assert(state.IsAdjusting && !state.IsExpanded);
         });
         Check("pin blocks auto-collapse and unpin rechecks the pointer", () =>
         {

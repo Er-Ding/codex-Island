@@ -17,6 +17,7 @@ $selfContained = if ($FrameworkDependent) { 'false' } else { 'true' }
 if ($LASTEXITCODE -ne 0) { throw 'Windows publish failed. Close any running copy in the output folder before rebuilding.' }
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Destination $outputDirectory
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'README.md') -Destination (Join-Path $outputDirectory 'README.md')
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'CHANGELOG.md') -Destination (Join-Path $outputDirectory 'CHANGELOG.md')
 # Keep the user guide's relative links and previews usable in an extracted portable package.
 $guideDirectory = Join-Path $outputDirectory 'windows'
 New-Item -ItemType Directory -Path $guideDirectory -Force | Out-Null
